@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -9,6 +10,9 @@ from sqlalchemy import text
 from chainlens.db import get_neo4j_driver, get_pg_engine
 
 ROOT = Path(__file__).resolve().parents[1]
+APP_DIR = ROOT / "app"
+if str(APP_DIR) not in sys.path:
+    sys.path.insert(0, str(APP_DIR))
 SAMPLE_PATH = ROOT / "data" / "sample" / "transactions.parquet"
 
 

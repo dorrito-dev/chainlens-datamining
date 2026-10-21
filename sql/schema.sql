@@ -128,3 +128,35 @@ CREATE TABLE IF NOT EXISTS data_manifest (
 ALTER TABLE data_manifest ADD COLUMN IF NOT EXISTS bytes_processed BIGINT;
 ALTER TABLE data_manifest ADD COLUMN IF NOT EXISTS estimated_usd NUMERIC(18,6);
 ALTER TABLE data_manifest ADD COLUMN IF NOT EXISTS metadata JSONB;
+
+-- ---------------------------------------------------------------------------
+-- Phase 7 operations metadata.
+--
+-- pipeline_runs is operational, NOT analytical. It is deliberately absent from
+-- fact_transactions and the star schema: it records UI/CLI stage invocations so
+-- the operations console is stateless across browser refreshes and restarts.
+--
+-- `stage` includes 'admin' for destructive Admin-page actions. Those rows are
+-- written after the action succeeds (same transaction where possible) and use
+-- `error` as a human-readable description of what was done.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS pipeline_runs (
+    id               SERIAL PRIMARY KEY,
+    stage            TEXT NOT NULL CHECK (stage IN
+                       ('sample','ingest','features','detect','score','admin')),
+    mode             TEXT NOT NULL CHECK (mode IN ('sample','real')),
+    status           TEXT NOT NULL CHECK (status IN ('running','success','failed')),
+    started_at       TIMESTAMPTZ DEFAULT now(),
+    finished_at      TIMESTAMPTZ,
+    exit_code        INTEGER,
+    row_counts       JSONB,
+    version_snapshot JSONB,
+    log_path         TEXT,
+    error            TEXT,
+    triggered_by     TEXT DEFAULT 'ui'
+);
+
+CREATE INDEX IF NOT EXISTS idx_pipeline_runs_started
+    ON pipeline_runs(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_pipeline_runs_stage
+    ON pipeline_runs(stage, status);

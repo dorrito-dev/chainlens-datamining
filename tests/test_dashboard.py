@@ -8,7 +8,7 @@ from streamlit import cache_data
 from streamlit.testing.v1 import AppTest
 
 ROOT = Path(__file__).resolve().parents[1]
-APP_PATH = ROOT / "app" / "streamlit_app.py"
+APP_PATH = ROOT / "app" / "pages" / "3_Analyst_Dashboard.py"
 
 
 def _run_app(monkeypatch) -> AppTest:

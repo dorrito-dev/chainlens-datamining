@@ -14,7 +14,7 @@ endif
 	features-check features-check-local detect detect-local score score-local score-check \
 	score-check-local baseline baseline-local ablate ablate-local star-schema star-schema-local \
 	graph-load graph-load-local graph-reset graph-reset-local app app-local \
-	test test-local lint lint-local clean
+	logs-tail test test-local lint lint-local clean
 
 up: ## Build the app image, start all services, and wait for health
 	$(COMPOSE) up -d --build --wait
@@ -123,6 +123,11 @@ app: ## Launch Streamlit on http://localhost:8501 (NetworkX graph tab)
 
 app-local: ## Launch Streamlit with host Python
 	CHAINLENS_RUNNER=local $(RUNNER) app
+
+logs-tail: ## Tail the newest stage log (optional: STAGE=score)
+	@log=$$(ls -t data/logs/$(if $(STAGE),$(STAGE)_,)*.log 2>/dev/null | head -1); \
+	if [ -z "$$log" ]; then echo "No logs in data/logs"; exit 1; fi; \
+	echo "==> $$log"; tail -n 200 "$$log"
 
 test: ## Run pytest inside the app container
 	$(APP_EXEC) python -m pytest -q

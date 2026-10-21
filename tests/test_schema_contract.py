@@ -27,7 +27,8 @@ def test_apply_schema_is_idempotent(pg_engine):
 def test_every_schema_table_exists(pg_engine):
     apply_schema(pg_engine)
     tables = schema_tables()
-    assert len(tables) == 10, tables
+    assert len(tables) == 11, tables
+    assert "pipeline_runs" in tables
     for table in tables:
         assert table_exists(pg_engine, table), f"Missing table: {table}"
 
@@ -149,6 +150,18 @@ def test_minimal_insert_and_read_back_for_every_table(pg_engine):
                 ),
                 {"sha256": "0" * 64},
             )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO pipeline_runs
+                        (stage, mode, status, row_counts, version_snapshot,
+                         triggered_by)
+                    VALUES ('score', 'sample', 'success',
+                            CAST('{"risk_scores": 1}' AS JSONB), CAST('{}' AS JSONB),
+                            'schema-contract-test')
+                    """
+                )
+            )
 
             checks = {
                 "labels": ("address = :address", {"address": ADDRESSES[0]}),
@@ -169,6 +182,10 @@ def test_minimal_insert_and_read_back_for_every_table(pg_engine):
                 "data_manifest": (
                     "file_path = :file_path",
                     {"file_path": "data/sample/test.parquet"},
+                ),
+                "pipeline_runs": (
+                    "triggered_by = :triggered_by",
+                    {"triggered_by": "schema-contract-test"},
                 ),
             }
             for table, (where, params) in checks.items():

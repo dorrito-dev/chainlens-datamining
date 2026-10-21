@@ -12,7 +12,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 if [[ $# -lt 1 ]]; then
-  echo "usage: scripts/run.sh <doctor|overlap|preflight|labels|known|split|clean|ingest|features|features-check|cluster|graph|apriori|seed-scores|detect|score|score-check|baseline|ablate|star-schema|graph-load|graph-reset|app> [args...]" >&2
+  echo "usage: scripts/run.sh <doctor|overlap|preflight|sample|labels|known|split|clean|ingest|features|features-check|cluster|graph|apriori|seed-scores|detect|score|score-check|baseline|ablate|star-schema|graph-load|graph-reset|app> [args...]" >&2
   exit 2
 fi
 
@@ -61,6 +61,9 @@ case "$STAGE" in
   preflight)
     "${RUNNER[@]}" pipeline/00_preflight.py "$@"
     ;;
+  sample)
+    "${RUNNER[@]}" pipeline/00_generate_sample.py "$@"
+    ;;
   features)
     "${RUNNER[@]}" pipeline/03_features.py "$@"
     ;;
@@ -89,7 +92,7 @@ case "$STAGE" in
     "${RUNNER[@]}" pipeline/07_star_schema.py "$@"
     ;;
   app)
-    "${RUNNER[@]}" -m streamlit run app/streamlit_app.py \
+    "${RUNNER[@]}" -m streamlit run app/Home.py \
       --server.address 0.0.0.0 --server.port 8501 --server.headless true "$@"
     ;;
   graph-load|graph-reset|cluster|graph|apriori|seed-scores)
