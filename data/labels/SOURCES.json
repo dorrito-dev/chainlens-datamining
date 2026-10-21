@@ -1,0 +1,38 @@
+{
+  "retrieved_at": "2026-10-21",
+  "sources": {
+    "ofac": {
+      "description": "OFAC SDN Ethereum addresses, nightly snapshot maintained by brave-intl.",
+      "url": "https://raw.githubusercontent.com/brave-intl/ofac-sanctioned-digital-currency-addresses/lists/sanctioned_addresses_ETH.txt",
+      "snapshot_date": "2026-09-30",
+      "snapshot_branch_commit": "2026-09-30T14:42:59Z",
+      "file": "data/labels/ofac_eth.txt",
+      "sha256": "31a434f34cd994be8e223456985b3e0b863269e3e74609cb921a32afb7dcb9ab",
+      "confidence": 1.0,
+      "label": "sanctioned",
+      "note": "Current 2026 snapshot. Sanctions are not permanent; as_of records the exact snapshot. Tornado Cash-related entries were delisted from OFAC in 2025 and are not treated as automatically sanctioned forever."
+    },
+    "darklist": {
+      "description": "MyEtherWallet community darklist of malicious/scam Ethereum addresses.",
+      "url": "https://raw.githubusercontent.com/MyEtherWallet/ethereum-lists/master/src/addresses/addresses-darklist.json",
+      "snapshot_date": "2020-11-18",
+      "snapshot_branch_commit": "b4f97175ffd37fe5014f5318757034578d0dc923",
+      "file": "data/labels/darklist.json",
+      "sha256": "cd6d4491e0309c17f79c1c3245fb46b069077e9c0bdc00a9dbe08f3770f9dbab",
+      "confidence": 0.8,
+      "label": "darklist",
+      "note": "Community-curated, not adjudicated; file has not changed since 2020, so the snapshot date is the commit date."
+    },
+    "kaggle": {
+      "description": "Kaggle Ethereum Fraud Detection Dataset (Vagif Aliyev), mirrored on GitHub for reproducible download.",
+      "url": "https://www.kaggle.com/datasets/vagifa/ethereum-frauddetection-dataset",
+      "mirror_url": "https://raw.githubusercontent.com/rupak-roy/ethereum_fraud_detection/main/transaction_dataset.csv",
+      "publication_date": "2021-01-03",
+      "file": "data/labels/kaggle_fraud.csv",
+      "sha256": "69d81471c72b1ccd406636b820b2947ded2825794bca298ce38167e659f14c8b",
+      "confidence": 0.9,
+      "label": "fraud",
+      "note": "Only FLAG=1 rows are positives. Label quality is assumed uniform, hence default confidence 0.9."
+    }
+  }
+}

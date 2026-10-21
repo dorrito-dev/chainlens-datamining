@@ -1,0 +1,94 @@
+name: CI
+
+"on":
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    env:
+      POSTGRES_USER: chainlens
+      POSTGRES_PASSWORD: chainlens_ci
+      POSTGRES_DB: chainlens
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: chainlens_ci_pw
+      NEO4J_URI: bolt://localhost:7687
+      BIGQUERY_PROJECT: ci-placeholder
+      CHAINLENS_RUNNER: local
+      CHAINLENS_SAMPLE_MODE: "1"
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: chainlens
+          POSTGRES_PASSWORD: chainlens_ci
+          POSTGRES_DB: chainlens
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U chainlens -d chainlens"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+          --health-start-period 10s
+
+      neo4j:
+        image: neo4j:5.22-community
+        env:
+          NEO4J_AUTH: neo4j/chainlens_ci_pw
+          NEO4J_server_memory_heap_initial__size: 512m
+          NEO4J_server_memory_heap_max__size: 1g
+          NEO4J_server_memory_pagecache_size: 512m
+        ports:
+          - 7474:7474
+          - 7687:7687
+        options: >-
+          --health-cmd "cypher-shell -u neo4j -p chainlens_ci_pw 'RETURN 1'"
+          --health-interval 30s
+          --health-timeout 30s
+          --health-retries 5
+          --health-start-period 60s
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Doctor (env + Neo4j secret sync + DB connections)
+        run: make doctor
+
+      - name: Apply schema
+        run: make schema-local
+
+      - name: Window overlap gate (sample dataset)
+        run: make overlap
+
+      - name: Ingest labels, known addresses, split and clean sample data
+        run: make ingest-local
+
+      - name: Build features with train-only scaler (fixture path)
+        run: make features-local
+
+      - name: Run Phase 4 detection signals (fixture path)
+        run: make detect-local
+
+      - name: Run Phase 5 scoring and write traces (fixture path)
+        run: make score-local
+
+      - name: Test
+        run: make test-local
+
+      - name: Lint
+        run: make lint-local

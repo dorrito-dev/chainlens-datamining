@@ -1,0 +1,19 @@
+# Local credentials
+.env
+
+# Local data drops written by Phase 2
+data/raw/
+data/processed/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# OS/editor noise
+.DS_Store
+.idea/
+.vscode/

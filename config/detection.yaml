@@ -1,0 +1,17 @@
+# Phase 4 detection settings. Values are deliberately outside the scripts so
+# experiments can be reproduced without editing Python.
+dbscan:
+  # Sorted k-distance knee (k=min_samples=5) for n_eligible=216 (fixture run).
+  # notebook: notebooks/02_dbscan_tuning.ipynb
+  eps: 3.195323
+  min_samples: 5
+  eligibility_min_tx: 3
+
+graph:
+  max_cycles_per_scc: 1000
+  cycle_enumeration_cap: 5000
+  curated_top_n: 200
+  curated_max_nodes: 2000
+  curated_hops: 2
+  app_graph_node_cap: 200
+  app_graph_hops: 2
