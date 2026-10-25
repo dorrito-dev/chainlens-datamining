@@ -250,7 +250,9 @@ previous `3.195323` value produced one cluster and zero noise). Clusters feed th
 ### Louvain
 
 `nx.community.louvain_communities` runs on the undirected projection, seeded and weighted by
-`total_value_eth`. The community id is a display/context flag only; it is **not scored**.
+`total_value_eth`. The community id is a display/context flag only; it is **not scored**. The
+exact community count can vary by ±1 with Python's hash seed, so the dashboard treats it as
+context, not a fixed metric.
 
 ---
 
@@ -347,7 +349,7 @@ were then reproduced with `--skip-fetch`.
 
 | Wallets | Tiers | R1 | R2 | R3 | R4 | R5 | DBSCAN | Louvain | Test positives / negatives |
 |---:|---|---:|---:|---:|---:|---|---|---|---:|
-| 25,779 | 25,290 low · 489 medium · 0 high | 0 | 68 | 442 | 1,370 | 0 rules (best lift 1.407 < 2.0) | 2 clusters · 32 noise | 8,879 communities | 118 / 150 |
+| 25,779 | 25,290 low · 489 medium · 0 high | 0 | 68 | 442 | 1,370 | 0 rules (best lift 1.407 < 2.0) | 2 clusters · 32 noise | ≈8,880 communities | 118 / 150 |
 
 | Operating point | Precision | Recall | F1 | TP / FP / TN / FN |
 |---|---:|---:|---:|---|
