@@ -14,7 +14,6 @@ import argparse
 import hashlib
 import json
 import subprocess
-import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -425,5 +424,10 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def main() -> int:
+    """Console-script entry point (`uv run chainlens ...`)."""
+    return 0 if run(build_parser().parse_args()) else 1
+
+
 if __name__ == "__main__":
-    sys.exit(0 if run(build_parser().parse_args()) else 1)
+    raise SystemExit(main())

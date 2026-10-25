@@ -14,8 +14,9 @@
 > only (not every graph counterparty); `dbscan eps` was recalibrated to `1.0122`
 > (95th percentile 5-NN distance); the dashboard/evaluation also reports a
 > secondary Medium ≥25 operating point; the known-address seed was expanded with
-> major token/router infrastructure; and the measured real-data result is an
-> honest weak/empty High tier, documented in the README.
+> major token/router infrastructure; the environment is uv-managed with a
+> committed lockfile; and the measured real-data result is an honest weak/empty
+> High tier, documented in the README.
 
 ---
 
@@ -298,7 +299,9 @@ ChainLens/
 │   └── output/            # scores, traces, flags, evaluation, run_info
 ├── tests/                 # 7 focused test files
 ├── .env.example           # includes ETHERSCAN_API_KEY placeholder
-├── requirements.txt
+├── .python-version        # pinned 3.11 for uv/CI
+├── uv.lock                # locked dependency graph
+├── requirements.txt       # fallback only; uv.lock is authoritative
 ├── pyproject.toml
 └── README.md
 ```
@@ -852,8 +855,8 @@ impossible. The sample parquet stays as the fallback.
 
 1. **What ChainLens is** — one paragraph, one dashboard, real data.
 2. **Six-stage diagram** — the same stage names as the deck, mapped to files.
-3. **Quickstart** — `.env`, `pip install -r requirements.txt`,
-   `python run.py --mode real`, `streamlit run dashboard.py`.
+3. **Quickstart** — `.env`, `uv sync --locked`, `uv run chainlens --mode real`,
+   `uv run streamlit run dashboard.py`.
 4. **Data** — Etherscan V2, key setup, rate limits, cache/resume, labels,
    negatives, context, window.
 5. **Algorithms** — R1–R5, DBSCAN, Apriori, Louvain, with one paragraph each and
@@ -1111,8 +1114,9 @@ output:
 
 **Keep:** `data/labels/`, `data/sample/`, `config/rules.yaml`,
 `config/detection.yaml`, `config/data.yaml`, `config/known_addresses.json`,
-`README.md`, `.env.example`, `.gitignore`, `requirements.txt`,
-`pyproject.toml`, one optional cleared EDA notebook, a one-job CI workflow.
+`README.md`, `.env.example`, `.gitignore`, `.python-version`, `uv.lock`,
+`requirements.txt` (fallback), `pyproject.toml`, one optional cleared EDA
+notebook, a one-job CI workflow.
 
 **Delete after Phase 4:** `chainlens/` (18 files), `pipeline/` (17),
 `app/` (12), `sql/` (2), `scripts/` (2), `Dockerfile`, `docker-compose.yml`,

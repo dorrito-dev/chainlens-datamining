@@ -25,7 +25,7 @@ The implementation is deliberately small:
 | `patterns.py` | Graph build, R1 cycles, R2 fan-out, R3 sanctioned 1-hop, R4 PageRank, DBSCAN, Apriori (R5), Louvain | `graph_edges.parquet`, `flags.parquet` |
 | `scoring.py` | Locked weights, tiers, clamp, known-address down-weight, trace contract | `scores.parquet`, `traces.parquet` |
 | `evaluate.py` | Test-split P/R/F1, insufficient-data guard, secondary operating point, ablation | `evaluation.json`, `evaluation.md`, `ablation.csv` |
-| `run.py` | CLI orchestrator for sample/real modes | all artifacts, `run_info.json`, `chainlens.duckdb` |
+| `run.py` | CLI orchestrator for sample/real modes; `uv run chainlens` entry point | all artifacts, `run_info.json`, `chainlens.duckdb` |
 | `dashboard.py` | Read-only Streamlit + Plotly dashboard | wallet explorer, graph, evaluation, CSV export |
 
 ```
@@ -42,29 +42,46 @@ The implementation is deliberately small:
 
 ## Quickstart
 
-### 1. Install
+### 1. Install uv
 
-Python 3.11+ is required (the code uses `X | None` type syntax). The development environment
-for this run used Python 3.14, but the target is 3.11.
+Python 3.11+ is required. The repository pins **3.11** in `.python-version` to match CI.
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source "$HOME/.local/bin/env"
+uv --version
 ```
 
-### 2. Run the offline sample first
+### 2. Create the environment
+
+```bash
+uv python install 3.11
+uv sync --locked
+```
+
+`uv sync` creates `.venv` from `.python-version` and installs the project plus the `dev`
+dependency group. You do **not** need to activate the environment; `uv run` uses it
+automatically. `requirements.txt` is kept only as a non-uv fallback.
+
+If an incompatible `.venv` already exists, recreate it:
+
+```bash
+uv venv --python 3.11 --clear
+uv sync --locked
+```
+
+### 3. Run the offline sample first
 
 The sample fixture needs **no API key** and is the fastest smoke test:
 
 ```bash
-python run.py --mode sample
-streamlit run dashboard.py
+uv run chainlens --mode sample
+uv run streamlit run dashboard.py
 ```
 
 Open the URL Streamlit prints (normally `http://localhost:8501`).
 
-### 3. Configure the real Etherscan key
+### 4. Configure the real Etherscan key
 
 ```bash
 cp .env.example .env
@@ -75,17 +92,17 @@ cp .env.example .env
 `https://api.etherscan.io/v2/api`, and is never written to `run_info.json` or any output
 artifact. `data/output/` and `data/cache/` are also gitignored.
 
-### 4. Run real data
+### 5. Run real data
 
 ```bash
 # Development sample (recommended first real run: ~600 addresses, ~4 minutes)
-python run.py --mode real --max-addresses 400 --max-txs 150 --context-max 200
+uv run chainlens --mode real --max-addresses 400 --max-txs 150 --context-max 200
 
 # Full configured scope (all labels, most-recent 500 tx/address)
-python run.py --mode real
+uv run chainlens --mode real
 
 # Re-run analytics/evaluation without re-fetching (uses cached raw + labels + split)
-python run.py --mode real --skip-fetch
+uv run chainlens --mode real --skip-fetch
 ```
 
 Useful flags:
@@ -106,12 +123,12 @@ rate, retries rate-limit responses, and caches each address by chain, offset, an
 window. A cache entry from a 150-transaction run is not silently reused by a 500-transaction
 run.
 
-### 5. Open the dashboard
+### 6. Open the dashboard
 
 ```bash
-streamlit run dashboard.py
+uv run streamlit run dashboard.py
 # or point it at another artifact directory:
-CHAINLENS_OUTPUT_DIR=/tmp/chainlens_run streamlit run dashboard.py
+CHAINLENS_OUTPUT_DIR=/tmp/chainlens_run uv run streamlit run dashboard.py
 ```
 
 Tabs: **Overview**, **Wallets**, **Network**, **Evaluation**, **About**. The wallet table is
@@ -325,7 +342,7 @@ The sample is for correctness and UI smoke testing, not evidence.
 
 #### Development run (600 addresses)
 
-`python run.py --mode real --max-addresses 400 --max-txs 150 --context-max 200`
+`uv run chainlens --mode real --max-addresses 400 --max-txs 150 --context-max 200`
 
 | Wallets | Tiers | R1 | R2 | R3 | R4 | R5 | DBSCAN | Louvain | Test positives / negatives |
 |---:|---|---:|---:|---:|---:|---|---|---|---:|
@@ -340,7 +357,7 @@ Average precision: **0.493** (case-control test sample; base positive rate 0.434
 
 #### 1,000-address comparison
 
-`python run.py --mode real --max-addresses 1000 --max-txs 500 --context-max 200`
+`uv run chainlens --mode real --max-addresses 1000 --max-txs 500 --context-max 200`
 
 This run requested 1,200 addresses (500 positives, 500 Kaggle negatives, 200 random-block
 context addresses), fetched 117,709 raw rows, and produced 25,779 scored wallets (counterparties
@@ -380,7 +397,7 @@ these labels, not a tuned success:
   (R3 + R2); the top-scoring addresses are still exchange/token/router infrastructure and are
   not all covered by the documented known-address seed.
 - The full configured label set is ~4,300 addresses and requires roughly 25–30 minutes at
-  3 req/s; the command is `python run.py --mode real` (optionally with a larger cache).
+  3 req/s; the command is `uv run chainlens --mode real` (optionally with a larger cache).
 
 ---
 
@@ -413,8 +430,8 @@ these labels, not a tuned success:
 ## Tests and CI
 
 ```bash
-ruff check .
-python -m pytest -q
+uv run ruff check .
+uv run pytest -q
 ```
 
 The 7 test files cover:
@@ -434,8 +451,9 @@ required artifacts, the DuckDB warehouse tables, trace validity, absence of the 
 text artifacts, and a Streamlit `AppTest` smoke run with zero exceptions. No test needs the
 network.
 
-CI (`.github/workflows/ci.yml`) installs `requirements.txt` on Python 3.11, runs `ruff check .`
-and `pytest -q`; it has no Postgres, Neo4j, or Docker services.
+CI (`.github/workflows/ci.yml`) uses `astral-sh/setup-uv` on Python 3.11, runs
+`uv sync --locked`, `uv run ruff check .`, and `uv run pytest -q`; it has no Postgres, Neo4j,
+or Docker services.
 
 ---
 
@@ -462,7 +480,9 @@ ChainLens/
 ├── run.py
 ├── dashboard.py
 ├── simplification_plan.md      # v2 design/decision record
-├── requirements.txt
+├── .python-version             # pinned 3.11 for uv/CI
+├── uv.lock                     # locked dependency graph
+├── requirements.txt            # fallback only; uv.lock is authoritative
 └── pyproject.toml
 ```
 
