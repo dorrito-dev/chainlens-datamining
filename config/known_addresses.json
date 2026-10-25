@@ -1,0 +1,81 @@
+{
+  "note": "Small, documented seed list for Phase 2. Not exhaustive. Addresses are lowercased and validated at load time. Sources: public Etherscan address labels and project bridge documentation.",
+  "as_of": "2026-10-21",
+  "addresses": [
+    {
+      "address": "0x28c6c06298d514db089934071355e5743bf21d60",
+      "category": "exchange",
+      "note": "Binance hot wallet (seed, not exhaustive)"
+    },
+    {
+      "address": "0x71660c4005ba85c37ccec55d0c4493e66fe775d3",
+      "category": "exchange",
+      "note": "Coinbase wallet (seed, not exhaustive)"
+    },
+    {
+      "address": "0x503828976d22510aad0201ac7ec88293211d23da",
+      "category": "exchange",
+      "note": "Coinbase 10 (seed, not exhaustive)"
+    },
+    {
+      "address": "0x267be1c1d684f78cb4f6a176c4911b741e4ffdc0",
+      "category": "exchange",
+      "note": "Kraken wallet (seed, not exhaustive)"
+    },
+    {
+      "address": "0x99c9fc46f92e8a1c0dec1b1747d010903e884be1",
+      "category": "bridge",
+      "note": "Optimism Gateway (seed, not exhaustive)"
+    },
+    {
+      "address": "0x40ec5b33f54e0e8a33a975908c5ba1c14e5bbbdf",
+      "category": "bridge",
+      "note": "Polygon PoS ERC20 bridge (seed, not exhaustive)"
+    },
+    {
+      "address": "0x4dbd4fc535ac27206064b68ffcf827b0a60bab3f",
+      "category": "bridge",
+      "note": "Arbitrum One Inbox (seed, not exhaustive)"
+    },
+    {
+      "address": "0xd90e2f925da726b50c4ed8d0fb90ad053324f31b",
+      "category": "mixer",
+      "note": "Tornado Cash Router (seed, not exhaustive; mixer classification is historical/factual, not an OFAC claim)"
+    },
+    {
+      "address": "0x12d66f87a04a9e220743712ce496d40bf7d2c5c6",
+      "category": "mixer",
+      "note": "Tornado Cash 0.1 ETH pool (seed, not exhaustive)"
+    },
+    {
+      "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      "category": "contract",
+      "note": "USDC token contract (infrastructure, down-weighted)"
+    },
+    {
+      "address": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+      "category": "contract",
+      "note": "USDT token contract (infrastructure, down-weighted)"
+    },
+    {
+      "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "category": "contract",
+      "note": "WETH token contract (infrastructure, down-weighted)"
+    },
+    {
+      "address": "0x6b175474e89094c44da98b954eedeac495271d0f",
+      "category": "contract",
+      "note": "DAI token contract (infrastructure, down-weighted)"
+    },
+    {
+      "address": "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984",
+      "category": "contract",
+      "note": "UNI token contract (infrastructure, down-weighted)"
+    },
+    {
+      "address": "0x1111111254fb6c44bac0bed2854e76f90643097d",
+      "category": "contract",
+      "note": "1inch v4 router (infrastructure, down-weighted)"
+    }
+  ]
+}

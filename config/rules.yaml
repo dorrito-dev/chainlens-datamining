@@ -1,9 +1,14 @@
-rules_version_label: "v0-deck"   # human reference; the DB stores a computed hash
+# ChainLens rule contract (v2). Rule weights are locked by the deck.
+rules_version_label: "v0-deck"
+schema_version: 2
+
+# Raw maximum is 110 (25+20+30+15+20); the final score is hard-clamped to 100.
 max_score: 100
 
 tiers:
-  low_max: 24
-  medium_max: 59                 # high = score > 59
+  low_max: 24          # low: 0-24
+  medium_max: 59       # medium: 25-59
+  high_min: 60         # high: 60-100 (must equal medium_max + 1)
 
 downweight:
   known_address_factor: 0.3
@@ -18,28 +23,44 @@ rules:
       cycle_length_max: 5
       value_tolerance: 0.05
       time_window_hours: 24
+      max_cycles_per_address: 5
+      max_scc_size: 5000
+
   - id: R2
     name: fanout
     weight: 20
     params:
+      # outbound_fanout = the tested v0 gate. deck_out_in = the zeroth-review gate.
+      mode: outbound_fanout
       fanout_threshold: 20
       min_outbound: 20
       min_ratio: 0.5
+      # Deck diagnostics, recorded in the trace but not scored in outbound_fanout mode.
+      deck_min_out_in_ratio: 5.0
+      deck_min_counterparties: 50
+
   - id: R3
     name: sanctioned_1hop
     weight: 30
     params:
       hops: 1
       seed_source: train_only
+
   - id: R4
     name: pagerank_top5pct
     weight: 15
     params:
       percentile: 95
+      alpha: 0.85
+      weight: total_value_eth
+      zero_weight_floor: 1.0e-12
+
   - id: R5
     name: apriori_match
     weight: 20
     params:
       min_support: 0.05
       min_lift: 2.0
+      min_confidence: 0.8
       mined_on: train_only
+      max_antecedent_size: 3

@@ -1,34 +1,28 @@
-window:
-  mode: label_anchored  # 'time' | 'label_anchored'; switched by the overlap gate
-  block_start: 19000000   # ~1 week: 45,001 blocks
-  block_end: 19045000
-  reference_block_start: 18900000   # wider range used for 1-2 hop expansion
-  reference_block_end: 19045000
-  neighbor_hops: 2
-  fallback_min_positives: 50   # if fewer labeled positives in window, switch to label_anchored
-
+# ChainLens data configuration. Secrets stay in .env, never here.
 paths:
-  raw_dir: data/raw
-  processed_dir: data/processed
-  sample_parquet: data/sample/transactions.parquet
-
-ingest:
-  sample_mode: false      # CI/local fixture runs set CHAINLENS_SAMPLE_MODE=1
-  raw_transactions: data/raw/transactions.parquet
-  raw_contracts: data/raw/contracts.parquet
   labels_dir: data/labels
-  labels_parquet: data/processed/labels_snapshot.parquet
-  clean_parquet: data/processed/transactions_clean.parquet
-  split_summary: data/processed/split_summary.json
-  window_decision: data/processed/window_decision.json
-  features_summary: data/processed/features_summary.json
-  known_seed: config/known_addresses_seed.json
-  bq_max_bytes: 1099511627776   # 1 TiB, the monthly free tier
-  bq_price_per_tib_usd: 6.25
+  sample_dir: data/sample
+  cache_dir: data/cache/addresses
+  output_dir: data/output
+  warehouse: data/output/chainlens.duckdb
 
-bigquery:
-  export_sql: pipeline/bigquery_export.sql
-  project: ${BIGQUERY_PROJECT}
+sampling:
+  seed: 42
+  test_size: 0.3
+  negative_count: 2000
+  context_random_blocks: 20
+  context_max_addresses: 500
+  max_addresses: null          # set from --max-addresses for a development run
 
-neo4j:
-  uri: ${NEO4J_URI}       # bolt://localhost:7687 for local Docker
+window:
+  mode: per_address_recent     # per_address_recent | fixed_blocks
+  max_txs_per_address: 500
+  fixed_block_start: 19000000
+  fixed_block_end: 19045000
+
+etherscan:
+  base_url: https://api.etherscan.io/v2/api
+  chain_id: 1
+  calls_per_second: 3
+  max_retries: 5
+  timeout_seconds: 30

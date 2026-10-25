@@ -1,0 +1,15 @@
+address,label,source,confidence,as_of,split,seed
+0x0fdc177f0374b437f32a28f092489b69fbf53c95,sanctioned,fixture,1.0,2026-01-01,train,42
+0x47f9743403ee0be680fa632ee530c16d0d77b8b8,darklist,fixture,0.8,2026-01-01,train,42
+0x07292c646e04b04e5517e5a68e70e0655d489a1c,darklist,fixture,0.8,2026-01-01,train,42
+0x057e0fa05dccd55204237da6f86e3f9d29df812f,fraud,fixture,0.9,2026-01-01,test,42
+0xa9a38e2efda97dd5a82ef075890f96c33be68070,negative,fixture,1.0,2026-01-01,train,42
+0x30200ff93eaf39880d61029b378e6aaad53c5c09,negative,fixture,1.0,2026-01-01,train,42
+0xd245a618c1050698d13459e57dc7529d1ad656ab,negative,fixture,1.0,2026-01-01,train,42
+0x5deb4ce295706a6c7bba7a25a0d4ded2da60ba26,negative,fixture,1.0,2026-01-01,train,42
+0xb09ba7a30ab4ceb04c6182de10fb7fa6741bad58,negative,fixture,1.0,2026-01-01,train,42
+0x499d6ee170d692e7fda6024aff2513cb27062542,negative,fixture,1.0,2026-01-01,train,42
+0xb0935f43c97a1c0419a4ce5acccf5bbaab71ec89,negative,fixture,1.0,2026-01-01,train,42
+0x90e619689d0a63adb183b0abe9d6e52f38c9dabe,negative,fixture,1.0,2026-01-01,test,42
+0x415ae1dcb6d8e1106ebfec3d1cbccf5720d0aece,negative,fixture,1.0,2026-01-01,test,42
+0xc22a66be9c8ea71e357b89fa9ba5ab71ed7d0ac0,negative,fixture,1.0,2026-01-01,test,42

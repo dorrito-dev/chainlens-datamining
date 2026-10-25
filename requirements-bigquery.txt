@@ -1,3 +1,0 @@
-# Optional one-off ingestion dependencies. Not installed in the runtime image
-# unless INSTALL_BIGQUERY=1 is passed to `make up`.
-google-cloud-bigquery>=3.25,<4

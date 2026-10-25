@@ -1,13 +1,13 @@
 # Local credentials
 .env
 
-# Local data drops written by Phase 2
+# Generated data (keep the committed sample + labels)
 data/raw/
 data/processed/
-
-# Phase 7 stage logs (keep the directory via .gitkeep)
-data/logs/*
-!data/logs/.gitkeep
+data/cache/
+data/output/
+data/output_*/
+*.duckdb
 
 # Python
 __pycache__/

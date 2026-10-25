@@ -1,17 +1,22 @@
-# Phase 4 detection settings. Values are deliberately outside the scripts so
-# experiments can be reproduced without editing Python.
+# Detection parameters. All are read at runtime; no magic numbers in code.
 dbscan:
-  # Sorted k-distance knee (k=min_samples=5) for n_eligible=216 (fixture run).
-  # notebook: notebooks/02_dbscan_tuning.ipynb
-  eps: 3.195323
+  # 95th percentile of the 5-NN distance on the current feature cohort.
+  # Recompute from the k-distance if the cohort or scaler changes.
+  eps: 1.0122
   min_samples: 5
-  eligibility_min_tx: 3
+  min_tx_total: 3
 
-graph:
-  max_cycles_per_scc: 1000
-  cycle_enumeration_cap: 5000
-  curated_top_n: 200
-  curated_max_nodes: 2000
-  curated_hops: 2
-  app_graph_node_cap: 200
-  app_graph_hops: 2
+louvain:
+  seed: 42
+  weight: total_value_eth
+  resolution: 1.0
+
+pagerank:
+  alpha: 0.85
+  max_iter: 100
+  tol: 1.0e-6
+
+cycles:
+  max_scc_size: 5000
+  enum_cap: 5000
+  per_scc_cap: 1000

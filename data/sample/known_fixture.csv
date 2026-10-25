@@ -1,0 +1,4 @@
+address,category,note
+0xfee200256c48484dece5443bab816166fdbfff92,exchange,Synthetic exchange hot wallet for down-weighting.
+0x45fd76c4bf6c6cb720f895a356b305f7205ebb3a,contract,Synthetic contract address.
+0x07292c646e04b04e5517e5a68e70e0655d489a1c,mixer,Synthetic mixer-tagged source.

@@ -1,0 +1,93 @@
+"""End-to-end sample pipeline and dashboard smoke test."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import duckdb
+import pandas as pd
+
+from scoring import validate_trace
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_sample_pipeline_contract(sample_output: Path) -> None:
+    required = [
+        "transactions_raw.parquet", "transactions_clean.parquet",
+        "wallet_features.parquet", "flags.parquet", "scores.parquet",
+        "traces.parquet", "graph_edges.parquet", "labels.parquet",
+        "splits.parquet", "known_addresses.parquet", "evaluation.json",
+        "evaluation.md", "ablation.csv", "run_info.json", "scores.csv",
+        "traces.csv", "chainlens.duckdb",
+    ]
+    for name in required:
+        assert (sample_output / name).exists(), name
+
+    scores = pd.read_parquet(sample_output / "scores.parquet")
+    traces = pd.read_parquet(sample_output / "traces.parquet")
+    features = pd.read_parquet(sample_output / "wallet_features.parquet")
+    flags = pd.read_parquet(sample_output / "flags.parquet")
+    edges = pd.read_parquet(sample_output / "graph_edges.parquet")
+    run_info = json.loads((sample_output / "run_info.json").read_text())
+    evaluation = json.loads((sample_output / "evaluation.json").read_text())
+
+    assert len(scores) == len(traces) == len(features) == 377
+    assert scores["address"].is_unique
+    assert set(scores["tier"]) <= {"low", "medium", "high"}
+    assert len(edges) > 0
+    assert {"from_address", "to_address", "tx_count", "total_value_eth"} <= set(edges.columns)
+    assert {"cycle_member", "fanout", "sanctioned_1hop", "pagerank_top5"} & set(flags["signal_name"])
+    assert "dbscan_noise" in set(flags["signal_name"])
+    assert evaluation["insufficient"] is True
+    assert run_info["mode"] == "sample"
+    assert run_info["data_source"] == "sample"
+    assert run_info["api_key_present"] is False
+    assert len(run_info["rules_sha256"]) == 64
+    assert len(run_info["scaler_version"]) == 12
+    assert run_info["patterns"]["graph_nodes"] == 377
+
+    parsed = traces["trace_json"].map(json.loads)
+    assert len(parsed) == 377
+    for trace in parsed.head(10):
+        validate_trace(trace)
+
+    con = duckdb.connect(str(sample_output / "chainlens.duckdb"), read_only=True)
+    try:
+        tables = set(con.execute("SHOW TABLES").fetchdf()["name"])
+        for table in (
+            "transactions", "wallet_features", "feature_scaler", "labels",
+            "splits", "known_addresses", "wallet_flags", "risk_scores",
+            "score_trace", "graph_edges", "run_info",
+        ):
+            assert table in tables, table
+        assert con.execute("SELECT COUNT(*) FROM risk_scores").fetchone()[0] == 377
+    finally:
+        con.close()
+
+
+def test_no_api_key_in_sample_artifacts(sample_output: Path) -> None:
+    import fetch_data
+
+    key = fetch_data.load_api_key(required=False)
+    if not key:
+        return
+    for path in sample_output.glob("*"):
+        if path.suffix in {".json", ".csv", ".md", ".yaml", ".txt"}:
+            assert key not in path.read_text(encoding="utf-8", errors="ignore"), path.name
+
+
+def test_dashboard_starts_without_exceptions(sample_output: Path, monkeypatch) -> None:
+    from streamlit.testing.v1 import AppTest
+
+    monkeypatch.setenv("CHAINLENS_OUTPUT_DIR", str(sample_output))
+    app = AppTest.from_file(str(ROOT / "dashboard.py"), default_timeout=90)
+    app.run()
+    assert len(app.exception) == 0, [e.value for e in app.exception]
+    labels = [tab.label for tab in app.tabs]
+    assert "📊 Overview" in labels
+    assert "🔎 Wallets" in labels
+    assert "🕸️ Network" in labels
+    assert "📐 Evaluation" in labels
+    assert len(app.metric) >= 5
