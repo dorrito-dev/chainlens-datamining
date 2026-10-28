@@ -959,8 +959,8 @@ def render_dossier(bundle: dict[str, Any]) -> None:
         cols = st.columns(5)
         for i, (rid, rname, rwt, rdesc) in enumerate(rule_cards):
             rinfo = rules_data.get(rid, {})
-            triggered = bool(rinfo.get("triggered", False))
-            pts = int(rinfo.get("points", 0))
+            triggered = bool(rinfo.get("hit", False))
+            pts = int(rinfo.get("contribution", 0))
             inputs = rinfo.get("inputs", {})
 
             with cols[i]:
@@ -985,7 +985,7 @@ def render_dossier(bundle: dict[str, Any]) -> None:
     rule_pts = {}
     if trace and "rules" in trace:
         for r_id, r_info in trace["rules"].items():
-            rule_pts[f"{r_id} ({r_info.get('name', r_id)})"] = r_info.get("points", 0)
+            rule_pts[f"{r_id} ({r_info.get('name', r_id)})"] = r_info.get("contribution", 0)
 
     if rule_pts:
         fig_bar = go.Figure(go.Bar(
