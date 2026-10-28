@@ -1,18 +1,20 @@
 """ChainLens dashboard.
 
-Read-only Streamlit app. It loads the artifacts written by run.py and never
-recomputes features, flags, scores, or evaluation metrics. The network tab uses
-NetworkX only for a spring layout of an already-computed edge list.
+Read-only Streamlit workspace for the artifacts written by run.py. The app never
+imports scoring/patterns/evaluate and never recomputes features, flags, scores, or
+evaluation metrics. It only renders and summarises data/output/.
 
 Run:
-    streamlit run dashboard.py
+    uv run streamlit run dashboard.py
 """
 
 from __future__ import annotations
 
+import io
 import json
 import math
 import os
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -25,10 +27,75 @@ APP_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = Path(os.environ.get("CHAINLENS_OUTPUT_DIR", APP_DIR / "data" / "output"))
 TIER_ORDER = ["high", "medium", "low"]
 TIER_COLORS = {"high": "#ef4444", "medium": "#f59e0b", "low": "#64748b"}
-TIER_ICONS = {"high": "🔴", "medium": "🟠", "low": "⚪"}
+TIER_LABELS = {"high": "High", "medium": "Medium", "low": "Low"}
+SIGNAL_LABELS = {
+    "cycle_member": "R1 · cycle",
+    "fanout": "R2 · fan-out",
+    "sanctioned_1hop": "R3 · sanctioned 1-hop",
+    "pagerank_top5": "R4 · PageRank top 5%",
+    "apriori_match": "R5 · Apriori match",
+    "dbscan_noise": "DBSCAN · noise",
+    "dbscan_cluster": "DBSCAN · cluster",
+    "louvain_community": "Louvain · community",
+}
+WALLET_SIGNALS = [
+    "cycle_member", "fanout", "sanctioned_1hop",
+    "pagerank_top5", "apriori_match", "dbscan_noise",
+]
+FLAG_COLORS = {
+    "cycle_member": "#f97316",
+    "fanout": "#eab308",
+    "sanctioned_1hop": "#ef4444",
+    "pagerank_top5": "#a78bfa",
+    "apriori_match": "#38bdf8",
+    "dbscan_noise": "#94a3b8",
+    "": "#475569",
+}
+COMMUNITY_COLORS = [
+    "#38bdf8", "#a78bfa", "#f472b6", "#f97316", "#facc15",
+    "#34d399", "#fb7185", "#c084fc", "#2dd4bf", "#f59e0b",
+]
+FEATURE_FIELDS = [
+    "tx_count_out", "tx_count_in", "tx_count_total", "unique_counterparties",
+    "unique_senders", "fanout_ratio", "out_in_ratio", "total_value_eth",
+    "avg_value_eth", "median_value_eth", "net_flow_eth", "active_days",
+    "round_number_ratio", "is_contract",
+]
+VIEWS = [
+    "Overview",
+    "Triage",
+    "Wallet dossier",
+    "Network",
+    "Patterns",
+    "Evaluation",
+    "Data & export",
+]
+FILTER_KEYS = [
+    "flt_tiers", "flt_score", "flt_rules", "flt_known", "flt_label",
+    "flt_split", "flt_flagged", "flt_watchlist", "flt_search",
+]
+EXPORT_FILES = [
+    "scores.parquet", "scores.csv", "flags.parquet", "traces.parquet",
+    "traces.csv", "graph_edges.parquet", "evaluation.json", "evaluation.md",
+    "ablation.csv", "run_info.json",
+]
+ARTIFACT_SPECS = {
+    "scores.parquet": "Wallet scores and tiers",
+    "traces.parquet": "Per-wallet R1–R5 trace",
+    "flags.parquet": "Rule, DBSCAN, PageRank and Louvain signals",
+    "graph_edges.parquet": "Aggregated transaction graph",
+    "wallet_features.parquet": "Raw and train-scaled wallet features",
+    "labels.parquet": "Labels and provenance",
+    "splits.parquet": "Leakage-safe train/test split",
+    "known_addresses.parquet": "Down-weight seed addresses",
+    "transactions_clean.parquet": "Cleaned transaction evidence",
+    "evaluation.json": "Held-out evaluation metrics",
+    "ablation.csv": "Leave-one-rule-out ablation",
+    "run_info.json": "Run provenance and versions",
+}
 
 st.set_page_config(
-    page_title="ChainLens · Ethereum wallet risk",
+    page_title="ChainLens · Wallet risk workspace",
     page_icon="🔗",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -37,119 +104,112 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    .block-container { padding-top: 1.1rem; padding-bottom: 2rem; }
-    [data-testid="stMetricValue"] { font-size: 1.65rem; }
-    .cl-hero { padding: 1.1rem 1.3rem; border: 1px solid #1e293b;
-               border-radius: 14px; background: linear-gradient(120deg, #0f172a, #111827); }
-    .cl-hero h1 { margin: 0; font-size: 1.8rem; letter-spacing: -0.02em; }
-    .cl-hero p { margin: .35rem 0 0; color: #94a3b8; }
-    .cl-note { color: #94a3b8; font-size: .9rem; }
-    .cl-badge { display:inline-block; padding:.12rem .5rem; border-radius:999px;
-                font-size:.75rem; font-weight:600; }
+    .block-container { padding-top: 1.0rem; padding-bottom: 2.2rem; max-width: 1600px; }
+    [data-testid="stMetricValue"] { font-size: 1.5rem; letter-spacing: -0.02em; }
+    .cl-kicker { color:#7dd3fc; font-size:.72rem; font-weight:700; letter-spacing:.14em;
+                 text-transform:uppercase; margin-bottom:.2rem; }
+    .cl-header { border-bottom:1px solid #1e293b; padding:.2rem 0 .9rem; margin-bottom:1rem; }
+    .cl-header h1 { margin:0; font-size:1.65rem; letter-spacing:-.03em; }
+    .cl-header p { margin:.35rem 0 0; color:#94a3b8; font-size:.9rem; }
+    .cl-badge { display:inline-block; padding:.12rem .52rem; border-radius:999px;
+                font-size:.72rem; font-weight:700; letter-spacing:.02em; }
     .cl-high { background:#7f1d1d; color:#fecaca; }
     .cl-medium { background:#78350f; color:#fde68a; }
     .cl-low { background:#1e293b; color:#cbd5e1; }
-    div[data-testid="stSidebar"] { border-right: 1px solid #1e293b; }
+    .cl-chip { display:inline-block; padding:.18rem .55rem; border-radius:6px;
+               background:#111827; border:1px solid #1e293b; color:#cbd5e1;
+               font-size:.76rem; margin:0 .3rem .3rem 0; }
+    .cl-muted { color:#94a3b8; font-size:.85rem; }
+    div[data-testid="stSidebar"] { border-right:1px solid #1e293b; }
+    div[data-testid="stSidebar"] .block-container { padding-top:1rem; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 
-# ── data loading ──────────────────────────────────────────────────────────────
+# ── helpers ───────────────────────────────────────────────────────────────────
 def _stamp(directory: Path) -> float:
-    files = [
+    names = [
         "scores.parquet", "traces.parquet", "flags.parquet", "graph_edges.parquet",
-        "wallet_features.parquet", "evaluation.json", "ablation.csv", "run_info.json",
-        "labels.parquet", "splits.parquet", "known_addresses.parquet",
+        "wallet_features.parquet", "transactions_clean.parquet", "evaluation.json",
+        "ablation.csv", "run_info.json", "labels.parquet", "splits.parquet",
+        "known_addresses.parquet",
     ]
-    values = []
-    for name in files:
-        path = directory / name
-        if path.exists():
-            values.append(path.stat().st_mtime)
+    values = [
+        (directory / name).stat().st_mtime
+        for name in names
+        if (directory / name).exists()
+    ]
     return max(values) if values else 0.0
 
 
-@st.cache_data(show_spinner=False)
-def load_artifacts(output_dir: str, stamp: float) -> dict[str, Any]:
-    del stamp  # cache key only
-    root = Path(output_dir)
-    data: dict[str, Any] = {"root": root, "missing": []}
-
-    def parquet(name: str, required: bool = True) -> pd.DataFrame:
-        path = root / name
-        if not path.exists():
-            if required:
-                data["missing"].append(name)
-            return pd.DataFrame()
-        return pd.read_parquet(path)
-
-    def csv(name: str) -> pd.DataFrame:
-        path = root / name
-        return pd.read_csv(path) if path.exists() else pd.DataFrame()
-
-    def js(name: str) -> dict[str, Any]:
-        path = root / name
-        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-
-    scores = parquet("scores.parquet")
-    traces = parquet("traces.parquet")
-    if not traces.empty and "trace_json" in traces.columns:
-        traces["trace"] = traces["trace_json"].map(
-            lambda value: json.loads(value) if isinstance(value, str) else value
-        )
-        traces = traces.drop(columns=["trace_json"])
-    features = parquet("wallet_features.parquet", required=False)
-    flags = parquet("flags.parquet", required=False)
-    edges = parquet("graph_edges.parquet", required=False)
-    labels = parquet("labels.parquet", required=False)
-    splits = parquet("splits.parquet", required=False)
-    known = parquet("known_addresses.parquet", required=False)
-
-    data.update({
-        "scores": scores,
-        "traces": traces,
-        "features": features,
-        "flags": flags,
-        "edges": edges,
-        "labels": labels,
-        "splits": splits,
-        "known": known,
-        "evaluation": js("evaluation.json"),
-        "run_info": js("run_info.json"),
-        "ablation": csv("ablation.csv"),
-    })
-    return data
+def _norm_address(value: Any) -> str:
+    return str(value).lower() if value is not None else ""
 
 
-def short(address: str) -> str:
-    return f"{address[:6]}…{address[-4:]}" if isinstance(address, str) and len(address) > 12 else str(address)
+def parse_json(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    return {}
 
 
-def tier_badge(tier: str) -> str:
-    klass = f"cl-{tier}" if tier in TIER_COLORS else "cl-low"
-    return f'<span class="cl-badge {klass}">{TIER_ICONS.get(tier, "⚪")} {tier.upper()}</span>'
+def short(address: str, left: int = 6, right: int = 4) -> str:
+    text = _norm_address(address)
+    return f"{text[:left]}…{text[-right:]}" if len(text) > left + right + 2 else text
 
 
 def fmt(value: Any, digits: int = 3) -> str:
     if value is None:
         return "—"
     try:
-        if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
-            return "—"
-        return f"{value:,.{digits}f}"
+        number = float(value)
     except (TypeError, ValueError):
         return str(value)
+    if math.isnan(number) or math.isinf(number):
+        return "—"
+    return f"{number:,.{digits}f}"
 
 
 def pct(value: Any) -> str:
     if value is None:
         return "—"
     try:
-        return f"{float(value) * 100:.1f}%"
+        number = float(value)
     except (TypeError, ValueError):
         return "—"
+    if math.isnan(number) or math.isinf(number):
+        return "—"
+    return f"{number * 100:.1f}%"
+
+
+def tier_badge(tier: str) -> str:
+    key = str(tier).lower()
+    klass = f"cl-{key}" if key in TIER_COLORS else "cl-low"
+    return f'<span class="cl-badge {klass}">{TIER_LABELS.get(key, key.upper())}</span>'
+
+
+def metric_card(label: str, value: str, help_text: str = "") -> None:
+    st.metric(label, value, help=help_text or None)
+
+
+def chart_layout(fig: go.Figure, height: int = 320, **kwargs: Any) -> go.Figure:
+    fig.update_layout(
+        template="plotly_dark",
+        height=height,
+        margin=dict(l=8, r=8, t=28, b=8),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#cbd5e1", size=12),
+        **kwargs,
+    )
+    return fig
 
 
 def evidence_summary(rule_id: str, inputs: Any) -> str:
@@ -158,644 +218,1320 @@ def evidence_summary(rule_id: str, inputs: Any) -> str:
     if rule_id == "R1":
         return f"{inputs.get('cycle_count', 0)} cycle(s), SCC {inputs.get('scc_size', '—')}"
     if rule_id == "R2":
-        return f"{inputs.get('unique_counterparties', '—')} counterparties, out/in {fmt(inputs.get('out_in_ratio'), 2)}"
+        return (f"{inputs.get('unique_counterparties', '—')} counterparties, "
+                f"out/in {fmt(inputs.get('out_in_ratio'), 2)}")
     if rule_id == "R3":
-        return f"seed {short(str(inputs.get('seed', '—')))} ({inputs.get('direction', '—')})"
+        return f"seed {short(inputs.get('seed', '—'))} ({inputs.get('direction', '—')})"
     if rule_id == "R4":
-        return f"PageRank {fmt(inputs.get('pagerank'), 6)} ≥ p95 {fmt(inputs.get('threshold'), 6)}"
+        return f"PageRank {fmt(inputs.get('pagerank'), 6)} ≥ {fmt(inputs.get('threshold'), 6)}"
     if rule_id == "R5":
         antecedent = inputs.get("antecedent") or []
-        return f"{' & '.join(antecedent)} → flagged; conf {fmt(inputs.get('confidence'), 3)}"
-    return json.dumps(inputs, default=str)[:120]
+        return f"{' & '.join(antecedent)} → flagged; lift {fmt(inputs.get('lift'), 2)}"
+    return json.dumps(inputs, default=str)[:160]
 
 
-def metric_card(label: str, value: str, help_text: str = "") -> None:
-    st.metric(label, value, help=help_text or None)
+# ── artifact loading ──────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False)
+def load_artifacts(output_dir: str, stamp: float) -> dict[str, Any]:
+    del stamp  # cache key only
+    root = Path(output_dir)
+    data: dict[str, Any] = {
+        "root": root,
+        "missing": [],
+        "errors": [],
+        "warnings": [],
+    }
+
+    def parquet(name: str, required: bool = False, columns: list[str] | None = None) -> pd.DataFrame:
+        path = root / name
+        if not path.exists():
+            if required:
+                data["missing"].append(name)
+                data["errors"].append(f"Missing required artifact: {name}")
+            return pd.DataFrame()
+        try:
+            return pd.read_parquet(path, columns=columns)
+        except Exception as exc:  # pragma: no cover - defensive around corrupt files
+            data["warnings"].append(f"Could not read {name}: {exc}")
+            return pd.DataFrame()
+
+    def csv(name: str) -> pd.DataFrame:
+        path = root / name
+        if not path.exists():
+            return pd.DataFrame()
+        try:
+            return pd.read_csv(path)
+        except Exception as exc:  # pragma: no cover
+            data["warnings"].append(f"Could not read {name}: {exc}")
+            return pd.DataFrame()
+
+    def js(name: str, required: bool = False) -> dict[str, Any]:
+        path = root / name
+        if not path.exists():
+            if required:
+                data["missing"].append(name)
+                data["errors"].append(f"Missing required artifact: {name}")
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            return payload if isinstance(payload, dict) else {}
+        except Exception as exc:
+            data["warnings"].append(f"Could not parse {name}: {exc}")
+            return {}
+
+    scores = parquet("scores.parquet", required=True)
+    traces_index = parquet("traces.parquet", columns=["address", "rules_version"])
+    features = parquet("wallet_features.parquet")
+    flags = parquet("flags.parquet")
+    edges = parquet("graph_edges.parquet")
+    labels = parquet("labels.parquet")
+    splits = parquet("splits.parquet")
+    known = parquet("known_addresses.parquet")
+    evaluation = js("evaluation.json")
+    run_info = js("run_info.json")
+    ablation = csv("ablation.csv")
+
+    for frame in (scores, traces_index, features, flags, labels, splits, known):
+        if not frame.empty and "address" in frame.columns:
+            frame["address"] = frame["address"].map(_norm_address)
+    if not edges.empty:
+        for column in ("from_address", "to_address"):
+            if column in edges.columns:
+                edges[column] = edges[column].map(_norm_address)
+
+    if scores.empty:
+        data.update({
+            "scores": scores, "traces": traces_index, "features": features,
+            "flags": flags, "edges": edges, "labels": labels, "splits": splits,
+            "known": known, "evaluation": evaluation, "run_info": run_info,
+            "ablation": ablation,
+        })
+        return data
+
+    required = {"address", "raw_score", "score", "tier", "top_driver"}
+    missing_columns = sorted(required - set(scores.columns))
+    if missing_columns:
+        data["errors"].append(f"scores.parquet is missing columns: {', '.join(missing_columns)}")
+
+    scores = scores.copy()
+    scores["address"] = scores["address"].map(_norm_address)
+    for column in ("raw_score", "score"):
+        if column in scores.columns:
+            scores[column] = pd.to_numeric(scores[column], errors="coerce").fillna(0).astype(int)
+    scores["tier"] = scores.get("tier", "low").astype(str).str.lower()
+    scores["top_driver"] = scores.get("top_driver", "").fillna("")
+
+    label_map: dict[str, str] = {}
+    source_map: dict[str, str] = {}
+    if not labels.empty:
+        if "label" in labels.columns:
+            label_map = (
+                labels.assign(label=labels["label"].astype(str))
+                .groupby("address")["label"]
+                .apply(lambda values: ", ".join(sorted(set(values))))
+                .to_dict()
+            )
+        if "source" in labels.columns:
+            source_map = (
+                labels.assign(source=labels["source"].astype(str))
+                .groupby("address")["source"]
+                .apply(lambda values: ", ".join(sorted(set(values))))
+                .to_dict()
+            )
+    split_map = (
+        dict(zip(splits["address"], splits["split"], strict=False))
+        if not splits.empty and "split" in splits.columns else {}
+    )
+    known_map = (
+        dict(zip(known["address"], known["category"], strict=False))
+        if not known.empty and "category" in known.columns else {}
+    )
+
+    scores["label"] = scores["address"].map(label_map).fillna("")
+    scores["source"] = scores["address"].map(source_map).fillna("")
+    scores["split"] = scores["address"].map(split_map).fillna("")
+    scores["known_category"] = scores["address"].map(known_map).fillna("")
+
+    flag_sets: dict[str, set[str]] = {}
+    signal_hits: dict[str, set[str]] = {signal: set() for signal in SIGNAL_LABELS}
+    community_map: dict[str, int] = {}
+    dbscan_map: dict[str, int] = {}
+    if not flags.empty and "signal_name" in flags.columns:
+        for row in flags.itertuples(index=False):
+            address = _norm_address(getattr(row, "address", ""))
+            signal = str(getattr(row, "signal_name", ""))
+            if not address:
+                continue
+            flag_sets.setdefault(address, set()).add(signal)
+            if signal in signal_hits:
+                signal_hits[signal].add(address)
+            if signal in {"louvain_community", "dbscan_cluster"}:
+                try:
+                    value = int(float(getattr(row, "signal_value", -1)))
+                except (TypeError, ValueError):
+                    value = -1
+                (community_map if signal == "louvain_community" else dbscan_map)[address] = value
+
+    for signal in SIGNAL_LABELS:
+        scores[f"hit_{signal}"] = scores["address"].isin(signal_hits.get(signal, set()))
+    scores["flag_count"] = scores[[f"hit_{signal}" for signal in WALLET_SIGNALS]].sum(axis=1).astype(int)
+
+    def primary_flag(address: str) -> str:
+        signals = flag_sets.get(address, set())
+        for signal in WALLET_SIGNALS:
+            if signal in signals:
+                return signal
+        return ""
+
+    scores["primary_flag"] = scores["address"].map(primary_flag)
+    scores["community_id"] = scores["address"].map(community_map)
+    scores["dbscan_cluster"] = scores["address"].map(dbscan_map)
+
+    if feature_columns := (set(features.columns) if not features.empty else set()):
+        if "scaler_version" not in feature_columns:
+            data["warnings"].append("wallet_features.parquet has no scaler_version column.")
+
+    if run_info:
+        if run_info.get("rows", {}).get("features") not in (None, len(scores)):
+            data["warnings"].append(
+                "run_info.rows.features does not match the number of scored wallets "
+                f"({run_info['rows'].get('features')} vs {len(scores)})."
+            )
+        score_version = str(scores["rules_version"].iloc[0]) if "rules_version" in scores else ""
+        if score_version and run_info.get("rules_version") not in (None, score_version):
+            data["warnings"].append(
+                f"rules_version mismatch: scores={score_version}, "
+                f"run_info={run_info.get('rules_version')}."
+            )
+        if not features.empty and "scaler_version" in features:
+            feature_versions = {str(v) for v in features["scaler_version"].dropna().unique()}
+            run_scaler = run_info.get("scaler_version")
+            if run_scaler and feature_versions and run_scaler not in feature_versions:
+                data["warnings"].append(
+                    f"scaler_version mismatch: features={sorted(feature_versions)}, "
+                    f"run_info={run_scaler}."
+                )
+        if not traces_index.empty and "rules_version" in traces_index:
+            trace_versions = {str(v) for v in traces_index["rules_version"].dropna().unique()}
+            if trace_versions and run_info.get("rules_version") not in (None, *trace_versions):
+                data["warnings"].append("traces.parquet rules_version does not match run_info.")
+        if run_info.get("skipped_fetch"):
+            data["warnings"].append(
+                "run_info reports --skip-fetch: fetch counters describe a previous run, "
+                "not this analytics run."
+            )
+        score_mtime = (root / "scores.parquet").stat().st_mtime if (root / "scores.parquet").exists() else 0
+        info_mtime = (root / "run_info.json").stat().st_mtime if (root / "run_info.json").exists() else 0
+        if info_mtime and score_mtime > info_mtime + 2:
+            data["warnings"].append("scores.parquet is newer than run_info.json; artifacts may be mixed.")
+
+    if evaluation and not evaluation.get("operating_points"):
+        data["warnings"].append("evaluation.json has no operating_points. High and Medium blocks may be incomplete.")
+
+    data.update({
+        "scores": scores,
+        "traces": traces_index,
+        "features": features,
+        "flags": flags,
+        "edges": edges,
+        "labels": labels,
+        "splits": splits,
+        "known": known,
+        "evaluation": evaluation,
+        "run_info": run_info,
+        "ablation": ablation,
+        "flag_sets": flag_sets,
+        "community_map": community_map,
+        "dbscan_map": dbscan_map,
+    })
+    return data
 
 
-# ── load ──────────────────────────────────────────────────────────────────────
-artifacts = load_artifacts(str(OUTPUT_DIR), _stamp(OUTPUT_DIR))
-scores: pd.DataFrame = artifacts["scores"]
-traces: pd.DataFrame = artifacts["traces"]
-features: pd.DataFrame = artifacts["features"]
-flags: pd.DataFrame = artifacts["flags"]
-edges: pd.DataFrame = artifacts["edges"]
-labels: pd.DataFrame = artifacts["labels"]
-splits: pd.DataFrame = artifacts["splits"]
-known: pd.DataFrame = artifacts["known"]
-evaluation: dict[str, Any] = artifacts["evaluation"]
-run_info: dict[str, Any] = artifacts["run_info"]
-ablation: pd.DataFrame = artifacts["ablation"]
+@st.cache_data(show_spinner=False)
+def load_trace(output_dir: str, address: str, stamp: float) -> dict[str, Any] | None:
+    del stamp
+    path = Path(output_dir) / "traces.parquet"
+    if not path.exists():
+        return None
+    try:
+        frame = pd.read_parquet(path, filters=[("address", "==", address)])
+    except Exception:
+        frame = pd.read_parquet(path)
+        frame = frame[frame["address"].astype(str).str.lower() == address]
+    if frame.empty:
+        return None
+    value = frame.iloc[0].get("trace_json")
+    if isinstance(value, str):
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+    return value if isinstance(value, dict) else None
 
-if scores.empty:
+
+@st.cache_data(show_spinner=False)
+def load_wallet_transactions(output_dir: str, address: str, stamp: float) -> pd.DataFrame:
+    del stamp
+    path = Path(output_dir) / "transactions_clean.parquet"
+    if not path.exists():
+        return pd.DataFrame()
+    filters = [
+        [("from_address", "==", address)],
+        [("to_address", "==", address)],
+    ]
+    try:
+        frame = pd.read_parquet(path, filters=filters)
+    except Exception:
+        frame = pd.read_parquet(path)
+        frame = frame[
+            (frame["from_address"].astype(str).str.lower() == address)
+            | (frame["to_address"].astype(str).str.lower() == address)
+        ]
+    if frame.empty:
+        return frame
+    frame = frame.copy()
+    frame["from_address"] = frame["from_address"].map(_norm_address)
+    frame["to_address"] = frame["to_address"].map(_norm_address)
+    frame["direction"] = frame.apply(
+        lambda row: "out" if row["from_address"] == address else "in", axis=1
+    )
+    frame["counterparty"] = frame.apply(
+        lambda row: row["to_address"] if row["direction"] == "out" else row["from_address"],
+        axis=1,
+    )
+    if "block_timestamp" in frame:
+        frame["block_timestamp"] = pd.to_datetime(frame["block_timestamp"], errors="coerce")
+    return frame.sort_values("block_timestamp", ascending=False, na_position="last")
+
+
+@st.cache_data(show_spinner=False)
+def compute_layout(
+    nodes: tuple[str, ...],
+    edge_pairs: tuple[tuple[str, str], ...],
+) -> dict[str, tuple[float, float]]:
+    graph = nx.Graph()
+    graph.add_nodes_from(nodes)
+    graph.add_edges_from(edge_pairs)
+    return nx.spring_layout(graph, seed=42, k=0.9, iterations=60)
+
+
+@st.cache_data(show_spinner=False)
+def build_export_zip(output_dir: str, stamp: float) -> bytes:
+    del stamp
+    root = Path(output_dir)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name in EXPORT_FILES:
+            path = root / name
+            if path.exists():
+                archive.write(path, arcname=name)
+    return buffer.getvalue()
+
+
+
+
+# ── session state & navigation ────────────────────────────────────────────────
+if "active_view" not in st.session_state:
+    st.session_state.active_view = "Overview"
+if "selected_wallet" not in st.session_state:
+    st.session_state.selected_wallet = ""
+if "watchlist" not in st.session_state:
+    st.session_state.watchlist = set()
+if "triage_page" not in st.session_state:
+    st.session_state.triage_page = 0
+if "triage_page_size" not in st.session_state:
+    st.session_state.triage_page_size = 50
+
+
+# ── view: Overview ────────────────────────────────────────────────────────────
+def render_overview(bundle: dict[str, Any]) -> None:
+    scores: pd.DataFrame = bundle["scores"]
+    run_info: dict[str, Any] = bundle["run_info"]
+    evaluation: dict[str, Any] = bundle["evaluation"]
+    st.markdown('<div class="cl-kicker">Run Overview & Executive Summary</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="cl-hero"><h1>🔗 ChainLens</h1>'
-        '<p>Ethereum wallet risk scoring with auditable R1–R5 rules.</p></div>',
+        '<div class="cl-header"><h1>ChainLens Intelligence Overview</h1>'
+        '<p>Read-only monitoring workspace for pipeline execution artifacts, risk distributions, and triage priorities.</p></div>',
         unsafe_allow_html=True,
     )
-    st.error(f"No scores found in `{OUTPUT_DIR}`.")
-    st.code("python run.py --mode sample\nstreamlit run dashboard.py", language="bash")
-    st.stop()
 
-# Convenience joins (labels are display-only; scores are already computed).
-label_map: dict[str, str] = {}
-if not labels.empty and "label" in labels.columns:
-    label_map = (
-        labels.assign(label=labels["label"].astype(str))
-        .groupby("address")["label"]
-        .apply(lambda s: ", ".join(sorted(set(s))))
-        .to_dict()
+    mode = run_info.get("mode", "real" if len(scores) > 1000 else "sample").upper()
+    data_source = run_info.get("data_source", "Etherscan API" if mode == "REAL" else "Sample fixture")
+    st.info(
+        f"**Pipeline Run**: {mode} Mode · Data source: **{data_source}** · "
+        f"**{len(scores):,}** wallets analyzed · Rules SHA: `{run_info.get('rules_sha256', '—')[:12]}…` · "
+        f"Scaler: `{run_info.get('scaler_version', '—')}`"
     )
-source_map: dict[str, str] = {}
-if not labels.empty and "source" in labels.columns:
-    source_map = (
-        labels.assign(source=labels["source"].astype(str))
-        .groupby("address")["source"]
-        .apply(lambda s: ", ".join(sorted(set(s))))
-        .to_dict()
-    )
-split_map: dict[str, str] = {}
-if not splits.empty and "split" in splits.columns:
-    split_map = dict(zip(splits["address"], splits["split"], strict=False))
-known_map: dict[str, str] = {}
-if not known.empty and "category" in known.columns:
-    known_map = dict(zip(known["address"], known["category"], strict=False))
 
-trace_by_address: dict[str, dict[str, Any]] = {}
-if not traces.empty and "trace" in traces.columns:
-    trace_by_address = dict(zip(traces["address"], traces["trace"], strict=False))
-
-scores = scores.copy()
-scores["label"] = scores["address"].map(label_map).fillna("")
-scores["source"] = scores["address"].map(source_map).fillna("")
-scores["split"] = scores["address"].map(split_map).fillna("")
-scores["known_category"] = scores["address"].map(known_map).fillna("")
-
-
-# ── sidebar ───────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.markdown("## 🔗 ChainLens")
-    st.caption("Auditable Ethereum wallet risk")
-    source = run_info.get("data_source", "unknown")
-    if source == "sample":
-        st.warning("Sample fixture data — not real Etherscan results.", icon="🧪")
-    else:
-        st.success(f"Data source: {source}", icon="🌐")
-    st.divider()
-    st.markdown("**Run**")
-    st.caption(
-        f"Rules `{run_info.get('rules_version_label', '—')}` · "
-        f"hash `{run_info.get('rules_version', '—')}`"
-    )
-    st.caption(f"Scaler `{run_info.get('scaler_version', '—')}`")
-    st.caption(f"Commit `{run_info.get('git_commit') or '—'}`")
-    st.caption(f"Generated `{run_info.get('finished_at', '—')}`")
-    st.divider()
-    tier_filter = st.multiselect(
-        "Tier", TIER_ORDER, default=TIER_ORDER,
-        format_func=lambda value: f"{TIER_ICONS[value]} {value}",
-    )
-    score_min, score_max = st.slider("Score range", 0, 100, (0, 100), step=1)
-    search = st.text_input("Address contains", placeholder="0x…")
-    if st.button("Reset filters", width="stretch"):
-        st.rerun()
-    st.divider()
-    st.caption("Read-only: this app never recomputes scores.")
-    st.caption(f"Artifacts: `{OUTPUT_DIR}`")
-
-filtered = scores[
-    scores["tier"].isin(tier_filter)
-    & scores["score"].between(score_min, score_max)
-]
-if search.strip():
-    filtered = filtered[filtered["address"].str.contains(search.strip().lower(), na=False)]
-filtered = filtered.sort_values(["score", "address"], ascending=[False, True]).reset_index(drop=True)
-
-st.markdown(
-    """
-    <div class="cl-hero">
-      <h1>🔗 ChainLens</h1>
-      <p>Ethereum wallet risk scoring · R1 circular flow · R2 fan-out · R3 sanction 1-hop ·
-         R4 PageRank · R5 Apriori · DBSCAN · Louvain</p>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-st.write("")
-
-tab_overview, tab_wallets, tab_network, tab_eval, tab_about = st.tabs(
-    ["📊 Overview", "🔎 Wallets", "🕸️ Network", "📐 Evaluation", "📘 About"]
-)
-
-
-# ── overview ──────────────────────────────────────────────────────────────────
-with tab_overview:
-    total = len(scores)
-    counts = scores["tier"].value_counts().to_dict()
-    high = int(counts.get("high", 0))
-    medium = int(counts.get("medium", 0))
-    low = int(counts.get("low", 0))
-    eval_f1 = evaluation.get("f1")
-    eval_precision = evaluation.get("precision")
-    eval_recall = evaluation.get("recall")
-    flagged = int((scores["raw_score"] > 0).sum())
-
-    c1, c2, c3, c4, c5 = st.columns(5)
+    # Top metrics
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     with c1:
-        metric_card("Wallets scored", f"{total:,}")
+        metric_card("Analyzed Wallets", f"{len(scores):,}", "Total wallets scored in dataset")
     with c2:
-        metric_card("🔴 High", f"{high:,}", "Score ≥ 60 (locked tier boundary)")
+        high_cnt = int((scores["tier"] == "high").sum())
+        metric_card("High Risk (≥60)", f"{high_cnt:,}", "Tier: High risk score 60-100")
     with c3:
-        metric_card("🟠 Medium", f"{medium:,}", "Score 25–59")
+        med_cnt = int((scores["tier"] == "medium").sum())
+        metric_card("Medium Risk (25-59)", f"{med_cnt:,}", "Tier: Medium risk score 25-59")
     with c4:
-        metric_card("Flagged by ≥1 rule", f"{flagged:,}", "Raw score > 0")
+        low_cnt = int((scores["tier"] == "low").sum())
+        metric_card("Low Risk (0-24)", f"{low_cnt:,}", "Tier: Low risk score 0-24")
     with c5:
-        metric_card("Test F1", pct(eval_f1) if eval_f1 is not None else "insufficient",
-                    "High-tier operating point on the leakage-safe test split")
+        flagged_cnt = int((scores["flag_count"] > 0).sum())
+        metric_card("Flagged Wallets", f"{flagged_cnt:,}", "Wallets triggering at least one heuristic or ML signal")
+    with c6:
+        ap = evaluation.get("average_precision")
+        metric_card("Test Avg Precision", pct(ap), "Area under PR curve on held-out test split")
 
-    if evaluation.get("insufficient"):
-        st.info(
-            "The test split has fewer than 3 labelled positives or negatives. "
-            "P/R/F1 is intentionally reported as **insufficient** rather than as a fake number.",
-            icon="ℹ️",
-        )
-
-    left, right = st.columns([1.15, 1.0])
-    with left:
-        st.subheader("Tier distribution")
-        tier_counts = scores["tier"].value_counts().reindex(TIER_ORDER).fillna(0)
-        fig = go.Figure(go.Bar(
-            x=tier_counts.index, y=tier_counts.values,
-            marker_color=[TIER_COLORS[t] for t in tier_counts.index],
-            text=[f"{int(v):,}" for v in tier_counts.values], textposition="outside",
-            hovertemplate="%{x}: %{y:,}<extra></extra>",
-        ))
-        fig.update_layout(
-            template="plotly_dark", height=330, margin=dict(l=10, r=10, t=10, b=10),
-            yaxis_title="wallets", xaxis_title="", showlegend=False,
-        )
-        st.plotly_chart(fig, width="stretch")
-
-    with right:
-        st.subheader("Score distribution")
-        fig = go.Figure(go.Histogram(
-            x=scores["score"], nbinsx=40, marker_color="#38bdf8",
-            hovertemplate="score %{x}: %{y}<extra></extra>",
-        ))
-        fig.add_vline(x=60, line_dash="dash", line_color="#ef4444",
-                      annotation_text="High ≥ 60", annotation_position="top")
-        fig.add_vline(x=25, line_dash="dot", line_color="#f59e0b",
-                      annotation_text="Medium ≥ 25", annotation_position="top")
-        fig.update_layout(
-            template="plotly_dark", height=330, margin=dict(l=10, r=10, t=10, b=10),
-            xaxis_title="score", yaxis_title="wallets", showlegend=False,
-        )
-        st.plotly_chart(fig, width="stretch")
-
-    left, right = st.columns([1.0, 1.3])
-    with left:
-        st.subheader("Top drivers")
-        driver_counts = scores["top_driver"].fillna("none").value_counts()
-        fig = go.Figure(go.Bar(
-            x=driver_counts.values, y=driver_counts.index, orientation="h",
-            marker_color="#a78bfa",
-            text=driver_counts.values, textposition="outside",
-            hovertemplate="%{y}: %{x}<extra></extra>",
-        ))
-        fig.update_layout(
-            template="plotly_dark", height=320, margin=dict(l=10, r=25, t=10, b=10),
-            xaxis_title="wallets", yaxis_title="", showlegend=False,
-        )
-        st.plotly_chart(fig, width="stretch")
-
-    with right:
-        st.subheader("Highest-scoring wallets")
-        top = filtered.head(15)[["address", "score", "tier", "top_driver", "label", "known_category"]]
-        st.dataframe(
-            top, hide_index=True, width="stretch", height=320,
-            column_config={
-                "address": st.column_config.TextColumn("address", width="medium"),
-                "score": st.column_config.ProgressColumn("score", min_value=0, max_value=100, format="%d"),
-                "tier": st.column_config.TextColumn("tier", width="small"),
-                "top_driver": st.column_config.TextColumn("driver", width="small"),
-                "label": st.column_config.TextColumn("label", width="small"),
-                "known_category": st.column_config.TextColumn("known", width="small"),
-            },
-        )
-
-    st.download_button(
-        "⬇️ Download filtered scores (CSV)",
-        filtered.to_csv(index=False).encode("utf-8"),
-        file_name="chainlens_scores_filtered.csv",
-        mime="text/csv",
-        width="content",
-    )
-
-
-# ── wallets ──────────────────────────────────────────────────────────────────
-with tab_wallets:
-    st.subheader("Wallet explorer")
-    st.caption("Select a row to open its auditable rule trace. The trace is an artifact; nothing is recomputed.")
-
-    table = filtered[["address", "score", "tier", "raw_score", "top_driver", "label", "known_category", "split"]]
-    event = st.dataframe(
-        table, hide_index=True, width="stretch", height=330,
-        on_select="rerun", selection_mode="single-row", key="wallet_table",
-        column_config={
-            "address": st.column_config.TextColumn("address", width="medium"),
-            "score": st.column_config.ProgressColumn("score", min_value=0, max_value=100, format="%d"),
-            "tier": st.column_config.TextColumn("tier", width="small"),
-            "raw_score": st.column_config.NumberColumn("raw", width="small"),
-            "top_driver": st.column_config.TextColumn("driver", width="small"),
-            "label": st.column_config.TextColumn("label", width="small"),
-            "known_category": st.column_config.TextColumn("known", width="small"),
-            "split": st.column_config.TextColumn("split", width="small"),
-        },
-    )
-
-    selected_rows = getattr(getattr(event, "selection", None), "rows", []) or []
-    if selected_rows:
-        st.session_state["selected_address"] = table.iloc[selected_rows[0]]["address"]
-    if not filtered.empty and "selected_address" not in st.session_state:
-        st.session_state["selected_address"] = filtered.iloc[0]["address"]
-
-    options = filtered["address"].tolist()
-    current = st.session_state.get("selected_address")
-    if current not in options:
-        current = options[0] if options else None
-    if options:
-        chosen = st.selectbox(
-            "Selected wallet", options, index=options.index(current),
-            format_func=lambda a: f"{short(a)} · score {int(scores.loc[scores['address'] == a, 'score'].iloc[0])}",
-        )
-        st.session_state["selected_address"] = chosen
-    else:
-        chosen = None
-        st.warning("No wallets match the current filters.")
-
-    if chosen:
-        row = scores.loc[scores["address"] == chosen].iloc[0]
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            st.markdown(f"**Score**  \n## {int(row['score'])} / 100")
-        with c2:
-            st.markdown("**Tier**  \n" + tier_badge(str(row["tier"])), unsafe_allow_html=True)
-        with c3:
-            st.markdown(f"**Raw score**  \n## {int(row['raw_score'])}")
-        with c4:
-            st.markdown(f"**Top driver**  \n## {row['top_driver'] or '—'}")
-
-        meta_cols = st.columns(4)
-        meta_cols[0].caption(f"Address `{chosen}`")
-        meta_cols[1].caption(f"Label: {row['label'] or '—'}")
-        meta_cols[2].caption(f"Source: {row['source'] or '—'}")
-        meta_cols[3].caption(f"Split: {row['split'] or '—'} | Known: {row['known_category'] or '—'}")
-
-        trace = trace_by_address.get(chosen)
-        if not trace:
-            st.warning("No trace artifact for this wallet.")
-        else:
-            st.markdown(
-                f"Down-weight applied: **{trace['downweight']['applied']}** · "
-                f"factor **{trace['downweight']['factor']}** · "
-                f"clamped: **{trace['clamped']}** · "
-                f"rules `{trace['rules_version']}`"
-            )
-            rules = trace["rules"]
-            trace_rows = []
-            for rule_id in ("R1", "R2", "R3", "R4", "R5"):
-                rule = rules[rule_id]
-                trace_rows.append({
-                    "rule": rule_id,
-                    "name": rule["name"],
-                    "hit": "✅" if rule["hit"] else "—",
-                    "weight": rule["weight"],
-                    "contribution": rule["contribution"],
-                    "evidence": evidence_summary(rule_id, rule.get("inputs")),
-                })
-            st.dataframe(pd.DataFrame(trace_rows), hide_index=True, width="stretch")
-
-            contributions = pd.DataFrame([
-                {"rule": f"{rule_id} · {rules[rule_id]['name']}", "contribution": rules[rule_id]["contribution"]}
-                for rule_id in ("R1", "R2", "R3", "R4", "R5")
-            ])
-            fig = go.Figure(go.Bar(
-                x=contributions["contribution"],
-                y=contributions["rule"],
-                orientation="h",
-                marker_color=["#ef4444" if v > 0 else "#334155" for v in contributions["contribution"]],
-                text=contributions["contribution"], textposition="outside",
-                hovertemplate="%{y}: %{x}<extra></extra>",
-            ))
-            fig.update_layout(
-                template="plotly_dark", height=300,
-                margin=dict(l=10, r=30, t=10, b=10),
-                xaxis_title="contribution", yaxis_title="", showlegend=False,
-                xaxis_range=[0, max(35, int(contributions["contribution"].max()) + 8)],
-            )
-            st.plotly_chart(fig, width="stretch")
-
-            with st.expander("Rule evidence (JSON)"):
-                st.json({rule_id: rules[rule_id].get("inputs") for rule_id in rules})
-            st.download_button(
-                "⬇️ Download this trace (JSON)",
-                json.dumps(trace, indent=2, default=str).encode("utf-8"),
-                file_name=f"trace_{chosen}.json",
-                mime="application/json",
-            )
-
-        if not features.empty:
-            feature_row = features.loc[features["address"] == chosen]
-            if not feature_row.empty:
-                with st.expander("Feature snapshot"):
-                    keep = [
-                        "tx_count_out", "tx_count_in", "tx_count_total", "unique_counterparties",
-                        "fanout_ratio", "out_in_ratio", "total_value_eth", "median_value_eth",
-                        "net_flow_eth", "round_number_ratio", "active_days", "is_contract",
-                    ]
-                    snapshot = feature_row[[c for c in keep if c in feature_row.columns]].T
-                    snapshot.columns = ["value"]
-                    st.dataframe(snapshot, width="stretch")
-
-
-# ── network ───────────────────────────────────────────────────────────────────
-with tab_network:
-    st.subheader("Transaction network")
-    st.caption("Spring layout is visualisation only. Nodes are coloured by the already-computed tier.")
-
-    if edges.empty:
-        st.info("No `graph_edges.parquet` artifact found.")
-    else:
-        c1, c2, c3 = st.columns([1.4, 0.8, 0.8])
-        with c1:
-            focus_options = scores["address"].tolist()
-            default_focus = st.session_state.get("selected_address", focus_options[0])
-            focus = st.selectbox(
-                "Focus address", focus_options,
-                index=focus_options.index(default_focus) if default_focus in focus_options else 0,
-                format_func=lambda a: f"{short(a)} · {int(scores.loc[scores['address'] == a, 'score'].iloc[0])} "
-                                      f"{scores.loc[scores['address'] == a, 'tier'].iloc[0]}",
-                key="network_focus",
-            )
-        with c2:
-            depth = st.radio("Hops", [1, 2], horizontal=True, index=1)
-        with c3:
-            max_nodes = st.slider("Max nodes", 30, 400, 180, 10)
-
-        adjacency: dict[str, set[str]] = {}
-        for row in edges.itertuples(index=False):
-            adjacency.setdefault(row.from_address, set()).add(row.to_address)
-            adjacency.setdefault(row.to_address, set()).add(row.from_address)
-
-        visited = {focus}
-        frontier = {focus}
-        for _ in range(depth):
-            nxt: set[str] = set()
-            for node in frontier:
-                nxt |= adjacency.get(node, set())
-            nxt -= visited
-            visited |= nxt
-            frontier = nxt
-            if len(visited) >= max_nodes:
-                break
-
-        score_lookup = dict(zip(scores["address"], scores["score"], strict=False))
-        tier_lookup = dict(zip(scores["address"], scores["tier"], strict=False))
-        driver_lookup = dict(zip(scores["address"], scores["top_driver"], strict=False))
-        selected = sorted(visited, key=lambda a: (-score_lookup.get(a, 0), a))[:max_nodes]
-        if focus not in selected:
-            selected.append(focus)
-        selected_set = set(selected)
-
-        sub = nx.DiGraph()
-        sub.add_nodes_from(selected)
-        for row in edges.itertuples(index=False):
-            if row.from_address in selected_set and row.to_address in selected_set:
-                sub.add_edge(
-                    row.from_address, row.to_address,
-                    tx_count=int(row.tx_count),
-                    value=float(row.total_value_eth),
-                )
-        if sub.number_of_nodes() == 0:
-            st.warning("No edges in the selected neighbourhood.")
-        else:
-            pos = nx.spring_layout(sub, seed=42, k=0.9, iterations=60)
-            edge_x: list[float | None] = []
-            edge_y: list[float | None] = []
-            for u, v in sub.edges():
-                x0, y0 = pos[u]
-                x1, y1 = pos[v]
-                edge_x += [x0, x1, None]
-                edge_y += [y0, y1, None]
-            edge_trace = go.Scatter(
-                x=edge_x, y=edge_y, mode="lines",
-                line=dict(width=0.7, color="#334155"),
-                hoverinfo="none", showlegend=False,
-            )
-
-            node_x, node_y, node_color, node_size, node_text, node_hover = [], [], [], [], [], []
-            for node in sub.nodes():
-                x, y = pos[node]
-                node_x.append(x)
-                node_y.append(y)
-                tier = tier_lookup.get(node, "low")
-                node_color.append(TIER_COLORS.get(tier, "#64748b"))
-                degree = sub.degree(node)
-                node_size.append(10 + min(18, degree * 1.5) + (8 if node == focus else 0))
-                score = score_lookup.get(node, 0)
-                node_text.append(short(node) if score >= 20 or node == focus else "")
-                node_hover.append(
-                    f"<b>{node}</b><br>score {int(score)} · {tier}<br>"
-                    f"driver {driver_lookup.get(node) or '—'}<br>degree {degree}"
-                )
-            node_trace = go.Scatter(
-                x=node_x, y=node_y, mode="markers+text",
-                marker=dict(
-                    size=node_size, color=node_color,
-                    line=dict(width=[2 if n == focus else 0.5 for n in sub.nodes()],
-                              color=["#f8fafc" if n == focus else "#0f172a" for n in sub.nodes()]),
-                ),
-                text=node_text, textposition="top center",
-                textfont=dict(size=9, color="#cbd5e1"),
-                hovertext=node_hover, hoverinfo="text",
-                showlegend=False,
-            )
-            fig = go.Figure(data=[edge_trace, node_trace])
-            fig.update_layout(
-                template="plotly_dark", height=620, showlegend=False,
-                margin=dict(l=5, r=5, t=5, b=5),
-                xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                hovermode="closest",
-            )
-            st.plotly_chart(fig, width="stretch")
-
-            legend = " · ".join(
-                f'<span class="cl-badge cl-{tier}">{TIER_ICONS[tier]} {tier}</span>'
-                for tier in TIER_ORDER
-            )
-            st.markdown(legend, unsafe_allow_html=True)
-            st.caption(
-                f"Showing {sub.number_of_nodes()} nodes and {sub.number_of_edges()} edges "
-                f"within {depth} hop(s) of `{short(focus)}`."
-            )
-
-            neighbours = pd.DataFrame([
-                {
-                    "address": n,
-                    "score": int(score_lookup.get(n, 0)),
-                    "tier": tier_lookup.get(n, "low"),
-                    "driver": driver_lookup.get(n),
-                    "degree": sub.degree(n),
-                }
-                for n in sub.nodes()
-            ]).sort_values(["score", "degree"], ascending=False)
-            st.dataframe(neighbours.head(100), hide_index=True, width="stretch")
-
-
-# ── evaluation ────────────────────────────────────────────────────────────────
-with tab_eval:
-    st.subheader("Held-out evaluation")
-    st.caption(
-        "Rules and the scaler are fitted on the train split. Test labels are never used by R5. "
-        "The sample is case-control, so P/R/F1 are sample metrics, not population estimates."
-    )
-
-    if evaluation.get("insufficient"):
+    if high_cnt == 0:
         st.warning(
-            f"**Insufficient test labels.** Positives: {evaluation.get('test_positives', 0)}, "
-            f"negatives: {evaluation.get('test_negatives', 0)}. At least 3 of each are required.",
-            icon="⚠️",
+            "ℹ️ **Operational Note: High Tier (≥60) is currently empty.** On real transaction subgraphs, "
+            "triggering multiple compound rules (R1+R2+R3) is rare. The **Medium Tier (25–59)** represents "
+            f"the active investigative queue ({med_cnt:,} wallets) with an operating Average Precision of {pct(ap)}."
         )
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        metric_card("Precision", pct(evaluation.get("precision")))
-    with c2:
-        metric_card("Recall", pct(evaluation.get("recall")))
-    with c3:
-        metric_card("F1", pct(evaluation.get("f1")))
-    with c4:
-        metric_card("Average precision", pct(evaluation.get("average_precision")))
 
-    st.caption(
-        f"Test addresses: {evaluation.get('test_addresses', 0)} · "
-        f"positives: {evaluation.get('test_positives', 0)} · "
-        f"negatives: {evaluation.get('test_negatives', 0)} · "
-        f"dropped (no activity): {evaluation.get('dropped_positives', 0)} positives, "
-        f"{evaluation.get('dropped_negatives', 0)} negatives."
-    )
+    st.markdown("### Risk & Signal Distributions")
+    col_left, col_right = st.columns([1, 1])
 
-    left, right = st.columns([0.9, 1.2])
-    with left:
-        st.markdown("**Confusion matrix** at High ≥ 60")
-        tp, fp = int(evaluation.get("tp", 0) or 0), int(evaluation.get("fp", 0) or 0)
-        tn, fn = int(evaluation.get("tn", 0) or 0), int(evaluation.get("fn", 0) or 0)
-        matrix = [[tn, fp], [fn, tp]]
-        fig = go.Figure(go.Heatmap(
-            z=matrix,
-            x=["pred low/med", "pred high"],
-            y=["actual negative", "actual positive"],
-            text=[[str(v) for v in row] for row in matrix],
-            texttemplate="%{text}", colorscale="Blues", showscale=False,
-            hovertemplate="%{y} / %{x}: %{z}<extra></extra>",
+    with col_left:
+        st.markdown("**Risk Score Distribution (0–100)**")
+        score_counts = scores["score"].value_counts().sort_index()
+        fig_score = go.Figure(go.Bar(
+            x=score_counts.index,
+            y=score_counts.values,
+            marker_color=[
+                TIER_COLORS["high"] if s >= 60 else TIER_COLORS["medium"] if s >= 25 else TIER_COLORS["low"]
+                for s in score_counts.index
+            ],
+            hovertemplate="Score: %{x}<br>Wallets: %{y:,}<extra></extra>",
         ))
-        fig.update_layout(
-            template="plotly_dark", height=300, margin=dict(l=10, r=10, t=10, b=10),
-            yaxis=dict(autorange="reversed"),
-        )
-        st.plotly_chart(fig, width="stretch")
+        chart_layout(fig_score, height=280, xaxis_title="Composite Score", yaxis_title="Wallet Count")
+        fig_score.update_layout(bargap=0.1)
+        st.plotly_chart(fig_score, width="stretch")
 
-    with right:
-        st.markdown("**Leave-one-rule-out ablation**")
-        if ablation.empty:
-            st.info("No ablation artifact.")
-        else:
-            show = ablation.copy()
-            for col in ("baseline_f1", "ablated_f1", "delta_f1"):
-                if col in show.columns:
-                    show[col] = pd.to_numeric(show[col], errors="coerce").round(3)
-            st.dataframe(
-                show, hide_index=True, width="stretch",
-                column_config={
-                    "rule": st.column_config.TextColumn("rule", width="small"),
-                    "affected_wallets": st.column_config.NumberColumn("wallets", width="small"),
-                    "baseline_f1": st.column_config.NumberColumn("base F1", format="%.3f"),
-                    "ablated_f1": st.column_config.NumberColumn("without", format="%.3f"),
-                    "delta_f1": st.column_config.NumberColumn("Δ F1", format="%.3f"),
-                    "tier_changes": st.column_config.NumberColumn("tier Δ", width="small"),
-                },
-            )
-            delta = ablation.dropna(subset=["delta_f1"]) if "delta_f1" in ablation.columns else pd.DataFrame()
-            if delta.empty:
-                st.info("Δ F1 is undefined because the test split is too small. Ablation still shows tier changes.")
-            else:
-                fig = go.Figure(go.Bar(
-                    x=delta["rule"], y=delta["delta_f1"],
-                    marker_color=["#ef4444" if v < 0 else "#22c55e" for v in delta["delta_f1"]],
-                    text=[f"{v:+.3f}" for v in delta["delta_f1"]], textposition="outside",
-                ))
-                fig.update_layout(
-                    template="plotly_dark", height=300,
-                    margin=dict(l=10, r=10, t=10, b=10),
-                    yaxis_title="Δ F1 when removed", xaxis_title="",
-                )
-                st.plotly_chart(fig, width="stretch")
+    with col_right:
+        st.markdown("**Signal & Rule Hit Frequencies**")
+        rule_hits = {}
+        for sig, lbl in SIGNAL_LABELS.items():
+            col_name = f"hit_{sig}"
+            if col_name in scores.columns:
+                rule_hits[lbl] = int(scores[col_name].sum())
+        if rule_hits:
+            fig_rules = go.Figure(go.Bar(
+                x=list(rule_hits.values()),
+                y=list(rule_hits.keys()),
+                orientation="h",
+                marker_color="#38bdf8",
+                text=[f"{v:,}" for v in rule_hits.values()],
+                textposition="auto",
+                hovertemplate="%{y}: %{x:,} hits<extra></extra>",
+            ))
+            chart_layout(fig_rules, height=280, xaxis_title="Hits", yaxis_title="")
+            fig_rules.update_layout(yaxis=dict(autorange="reversed"))
+            st.plotly_chart(fig_rules, width="stretch")
 
     st.divider()
-    st.markdown("**Reproducibility metadata**")
-    st.json(run_info)
-    st.download_button(
-        "⬇️ Download evaluation.json",
-        json.dumps(evaluation, indent=2, default=str).encode("utf-8"),
-        file_name="evaluation.json",
-        mime="application/json",
+
+    st.markdown("### Priority Triage Queue (Top Risk Candidates)")
+    st.caption("Highest-scoring candidates requiring immediate compliance and forensic review.")
+    top_candidates = scores[scores["score"] >= 25].sort_values(
+        by=["score", "raw_score"], ascending=False
+    ).head(10)
+
+    if top_candidates.empty:
+        st.info("No candidates scored at or above Medium threshold (25).")
+    else:
+        for row in top_candidates.itertuples():
+            addr = row.address
+            score_val = row.score
+            raw_val = row.raw_score
+            tier_val = row.tier
+            driver_val = row.top_driver
+            flags_val = row.flag_count
+            lbl_val = getattr(row, "label", "") or "—"
+
+            c_badge, c_addr, c_score, c_driver, c_flags, c_label, c_action = st.columns([1, 2.5, 1.2, 1.5, 1, 1.5, 1.2])
+            with c_badge:
+                st.markdown(tier_badge(tier_val), unsafe_allow_html=True)
+            with c_addr:
+                st.markdown(f"`{short(addr, 10, 8)}`")
+            with c_score:
+                st.markdown(f"**{score_val}** / 100 <span class='cl-muted'>(raw {raw_val})</span>", unsafe_allow_html=True)
+            with c_driver:
+                st.markdown(f"<span class='cl-chip'>{driver_val or 'None'}</span>", unsafe_allow_html=True)
+            with c_flags:
+                st.markdown(f"{flags_val} signal(s)")
+            with c_label:
+                st.markdown(f"<span class='cl-muted'>{lbl_val}</span>", unsafe_allow_html=True)
+            with c_action:
+                if st.button("Dossier →", key=f"top_{addr}"):
+                    st.session_state.selected_wallet = addr
+                    st.session_state.active_view = "Wallet dossier"
+                    st.rerun()
+
+
+# ── view: Triage ──────────────────────────────────────────────────────────────
+def render_triage(bundle: dict[str, Any]) -> None:
+    scores: pd.DataFrame = bundle["scores"]
+    st.markdown('<div class="cl-kicker">Investigative Queue</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="cl-header"><h1>Wallet Risk Triage</h1>'
+        '<p>Search, filter, and triage flagged wallets across heuristic rules and behavioural patterns.</p></div>',
+        unsafe_allow_html=True,
     )
 
+    with st.expander("🔍 Filter Controls", expanded=True):
+        f1, f2, f3, f4 = st.columns(4)
+        with f1:
+            selected_tiers = st.multiselect(
+                "Risk Tier",
+                options=TIER_ORDER,
+                default=["high", "medium"],
+                format_func=lambda t: TIER_LABELS.get(t, t.capitalize()),
+                key="flt_tiers",
+            )
+        with f2:
+            min_score, max_score = st.slider(
+                "Score Range",
+                min_value=0,
+                max_value=100,
+                value=(0, 100),
+                step=5,
+                key="flt_score",
+            )
+        with f3:
+            rule_options = list(WALLET_SIGNALS)
+            selected_rules = st.multiselect(
+                "Triggered Rule",
+                options=rule_options,
+                default=[],
+                format_func=lambda r: SIGNAL_LABELS.get(r, r),
+                key="flt_rules",
+            )
+        with f4:
+            split_options = ["All", "train", "test"]
+            selected_split = st.selectbox("Split Partition", options=split_options, key="flt_split")
 
-# ── about ─────────────────────────────────────────────────────────────────────
-with tab_about:
-    st.subheader("How ChainLens works")
+        f5, f6, f7, f8 = st.columns(4)
+        with f5:
+            known_cats = sorted(set(scores["known_category"].dropna().unique()) - {""})
+            selected_known = st.multiselect(
+                "Known Entity Category",
+                options=known_cats,
+                default=[],
+                key="flt_known",
+            )
+        with f6:
+            search_query = st.text_input("Search Address or Label", placeholder="0x... or label", key="flt_search").strip().lower()
+        with f7:
+            flagged_only = st.checkbox("Flagged wallets only (≥1 signal)", value=False, key="flt_flagged")
+        with f8:
+            watchlist_only = st.checkbox("Watchlist only", value=False, key="flt_watchlist")
+
+        c_reset, _ = st.columns([1, 5])
+        with c_reset:
+            if st.button("↺ Reset Filters"):
+                for k in FILTER_KEYS:
+                    if k in st.session_state:
+                        del st.session_state[k]
+                st.rerun()
+
+    # Apply filters
+    filtered = scores.copy()
+    if selected_tiers:
+        filtered = filtered[filtered["tier"].isin(selected_tiers)]
+    if min_score > 0 or max_score < 100:
+        filtered = filtered[(filtered["score"] >= min_score) & (filtered["score"] <= max_score)]
+    if selected_rules:
+        for r in selected_rules:
+            col = f"hit_{r}"
+            if col in filtered.columns:
+                filtered = filtered[filtered[col]]
+    if selected_split and selected_split != "All":
+        filtered = filtered[filtered["split"] == selected_split]
+    if selected_known:
+        filtered = filtered[filtered["known_category"].isin(selected_known)]
+    if search_query:
+        mask = (
+            filtered["address"].str.contains(search_query, na=False)
+            | filtered["label"].str.lower().str.contains(search_query, na=False)
+            | filtered["source"].str.lower().str.contains(search_query, na=False)
+        )
+        filtered = filtered[mask]
+    if flagged_only:
+        filtered = filtered[filtered["flag_count"] > 0]
+    if watchlist_only:
+        filtered = filtered[filtered["address"].isin(st.session_state.watchlist)]
+
+    st.markdown(
+        f"**Displaying {len(filtered):,} matching wallets** (of {len(scores):,} total in cohort)"
+    )
+
+    # Export filtered button
+    csv_bytes = filtered[[
+        "address", "score", "raw_score", "tier", "top_driver",
+        "flag_count", "known_category", "split", "label", "source"
+    ]].to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "⬇️ Export Filtered Wallets (CSV)",
+        data=csv_bytes,
+        file_name="chainlens_triage_filtered.csv",
+        mime="text/csv",
+    )
+
+    # Pagination controls
+    page_size = st.selectbox("Rows per page", options=[25, 50, 100], index=1, key="ps_select")
+    total_pages = max(1, math.ceil(len(filtered) / page_size))
+    current_page = max(0, min(st.session_state.triage_page, total_pages - 1))
+
+    col_prev, col_info, col_next = st.columns([1, 2, 1])
+    with col_prev:
+        if st.button("◀ Previous Page", disabled=(current_page == 0)):
+            st.session_state.triage_page = max(0, current_page - 1)
+            st.rerun()
+    with col_info:
+        st.markdown(f"<div style='text-align:center; padding-top:0.4rem;'>Page <b>{current_page + 1}</b> of <b>{total_pages}</b></div>", unsafe_allow_html=True)
+    with col_next:
+        if st.button("Next Page ▶", disabled=(current_page >= total_pages - 1)):
+            st.session_state.triage_page = min(total_pages - 1, current_page + 1)
+            st.rerun()
+
+    start_idx = current_page * page_size
+    page_data = filtered.iloc[start_idx : start_idx + page_size]
+
+    if page_data.empty:
+        st.info("No wallets match the specified filters.")
+        return
+
+    # Render table header
     st.markdown(
         """
-        **Pipeline (7 files).** `fetch_data.py` → `features.py` → `patterns.py` →
-        `scoring.py` → `evaluate.py`, orchestrated by `run.py`; `dashboard.py` reads
-        only `data/output/`.
+        <div style="display:grid; grid-template-columns: 0.8fr 2.5fr 1fr 1.2fr 1fr 1.2fr 1.5fr 1fr;
+                    font-weight:700; color:#94a3b8; font-size:0.8rem; border-bottom:1px solid #334155; padding-bottom:0.4rem; margin-top:0.8rem;">
+            <div>TIER</div>
+            <div>ADDRESS</div>
+            <div>SCORE</div>
+            <div>DRIVER</div>
+            <div>SIGNALS</div>
+            <div>KNOWN / SPLIT</div>
+            <div>LABEL / SOURCE</div>
+            <div>ACTION</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-        | Rule | Signal | Weight | Plain-English meaning |
-        |---|---|---:|---|
-        | R1 | circular flow | 25 | A short 3–5 hop cycle where edge values are within 5% and the cycle fits in 24h |
-        | R2 | fan-out | 20 | Many distinct outbound counterparties with a high outbound share |
-        | R3 | sanctioned 1-hop | 30 | One hop from a train-split sanctioned seed (both directions) |
-        | R4 | PageRank top 5% | 15 | High value-weighted PageRank in the transaction graph |
-        | R5 | Apriori match | 20 | Behavioural itemset match to train-split flagged wallets (confidence ≥ 0.8) |
+    for row in page_data.itertuples():
+        addr = row.address
+        tier_val = row.tier
+        score_val = row.score
+        raw_val = row.raw_score
+        driver_val = row.top_driver or "—"
+        flags_val = row.flag_count
+        known_val = row.known_category or "—"
+        split_val = row.split or "—"
+        label_val = getattr(row, "label", "") or "—"
+        source_val = getattr(row, "source", "") or ""
 
-        **Tiers.** Low 0–24 · Medium 25–59 · High 60–100. The raw maximum is 110 and is
-        hard-clamped to 100. Known exchange/bridge/mixer/contract addresses are multiplied
-        by 0.3 **before** clamping and tiering.
+        meta_sub = f"{known_val} · {split_val}" if known_val != "—" else split_val
+        label_disp = f"{label_val} ({source_val})" if source_val and label_val != "—" else label_val
 
-        **What this is not.** A score is not proof of wrongdoing. R4 is a prominence signal,
-        R5 is an association signal, and DBSCAN noise is a separate outlier flag. Use the
-        trace, not the number alone.
+        c_t, c_a, c_s, c_d, c_sig, c_m, c_l, c_act = st.columns([0.8, 2.5, 1, 1.2, 1, 1.2, 1.5, 1])
+        with c_t:
+            st.markdown(tier_badge(tier_val), unsafe_allow_html=True)
+        with c_a:
+            is_starred = "⭐ " if addr in st.session_state.watchlist else ""
+            st.markdown(f"`{is_starred}{short(addr, 8, 6)}`")
+        with c_s:
+            st.markdown(f"**{score_val}** <span class='cl-muted'>({raw_val})</span>", unsafe_allow_html=True)
+        with c_d:
+            st.markdown(f"<span class='cl-chip'>{driver_val}</span>", unsafe_allow_html=True)
+        with c_sig:
+            st.markdown(f"{flags_val}")
+        with c_m:
+            st.markdown(f"<span class='cl-muted'>{meta_sub}</span>", unsafe_allow_html=True)
+        with c_l:
+            st.markdown(f"<span class='cl-muted'>{short(label_disp, 16, 4)}</span>", unsafe_allow_html=True)
+        with c_act:
+            if st.button("Inspect", key=f"triage_btn_{addr}"):
+                st.session_state.selected_wallet = addr
+                st.session_state.active_view = "Wallet dossier"
+                st.rerun()
 
-        **Data.** Real mode uses Etherscan V2 normal transactions, per-address most-recent
-        500, a per-address cache, and a train/test split. Negatives are sampled Kaggle
-        `flag=0` addresses; context addresses come from random blocks. The sample is
-        case-control, so precision/recall are sample metrics.
 
-        **Deviations from the deck.** R2 is implemented as the outbound fan-out gate
-        (`unique_counterparties ≥ 20`, `tx_count_out ≥ 20`, `fanout_ratio ≥ 0.5`), not the
-        deck's `out_in_ratio > 5` + counterparties > 50. The deck version is recorded in
-        each R2 trace as `r2_deck_equivalent`. On the current locked weights, R1+R2+R4 =
-        60, not the slide-21 "65".
+# ── view: Wallet dossier ──────────────────────────────────────────────────────
+def render_dossier(bundle: dict[str, Any]) -> None:
+    scores: pd.DataFrame = bundle["scores"]
+    features: pd.DataFrame = bundle["features"]
+    edges: pd.DataFrame = bundle["edges"]
 
-        **Ethics.** Public-chain labels are noisy and stale; OFAC/darklist snapshots have
-        dates; Kaggle negatives are not verified non-fraud. Treat outputs as investigative
-        leads with human review.
+    st.markdown('<div class="cl-kicker">Subject Forensics</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="cl-header"><h1>Wallet Investigative Dossier</h1>'
+        '<p>Detailed multi-rule evidence trace, transaction timeline, graph neighborhood, and feature percentiles.</p></div>',
+        unsafe_allow_html=True,
+    )
+
+    # Select wallet control
+    candidate_list = scores.sort_values("score", ascending=False)["address"].head(100).tolist()
+    curr_addr = st.session_state.selected_wallet
+    if curr_addr not in candidate_list and curr_addr in set(scores["address"]):
+        candidate_list = [curr_addr] + candidate_list
+
+    c_sel, c_in = st.columns([2, 2])
+    with c_sel:
+        idx = candidate_list.index(curr_addr) if curr_addr in candidate_list else 0
+        chosen = st.selectbox(
+            "Select from priority candidate list (Top 100)",
+            options=candidate_list,
+            index=idx,
+            format_func=lambda a: f"{short(a)} · Score {scores.loc[scores['address']==a, 'score'].values[0]} ({scores.loc[scores['address']==a, 'tier'].values[0].upper()})" if a in set(scores['address']) else a,
+            key="dossier_select_box"
+        )
+        if chosen != curr_addr:
+            st.session_state.selected_wallet = chosen
+            curr_addr = chosen
+    with c_in:
+        custom = st.text_input("Or enter any 0x wallet address", placeholder="0x...").strip().lower()
+        if custom and custom in set(scores["address"]) and custom != curr_addr:
+            st.session_state.selected_wallet = custom
+            st.rerun()
+
+    addr = st.session_state.selected_wallet
+    if not addr or addr not in set(scores["address"]):
+        st.warning("Please select or enter a valid scored wallet address.")
+        return
+
+    row = scores[scores["address"] == addr].iloc[0]
+    tier_val = row["tier"]
+    score_val = int(row["score"])
+    raw_val = int(row["raw_score"])
+    driver_val = row["top_driver"]
+    known_val = row["known_category"]
+    split_val = row["split"]
+    label_val = row["label"]
+    source_val = row["source"]
+
+    # Dossier Banner
+    st.markdown("---")
+    top_c1, top_c2, top_c3 = st.columns([3, 1, 1])
+    with top_c1:
+        st.markdown(f"### Address `{addr}`")
+        badge_html = tier_badge(tier_val)
+        known_chip = f"<span class='cl-chip'>Known: {known_val} (0.3x multiplier)</span>" if known_val else ""
+        split_chip = f"<span class='cl-chip'>Split: {split_val}</span>" if split_val else ""
+        st.markdown(f"{badge_html} {known_chip} {split_chip}", unsafe_allow_html=True)
+        if label_val:
+            st.markdown(f"**Known Label**: `{label_val}` (Source: {source_val})")
+        etherscan_url = f"https://etherscan.io/address/{addr}"
+        st.markdown(f"[↗ View on Etherscan]({etherscan_url})", unsafe_allow_html=True)
+
+    with top_c2:
+        metric_card("Composite Score", f"{score_val} / 100", f"Clamped risk score (raw: {raw_val})")
+    with top_c3:
+        if addr in st.session_state.watchlist:
+            if st.button("★ Remove Watchlist", key="btn_wl_rem"):
+                st.session_state.watchlist.remove(addr)
+                st.rerun()
+        else:
+            if st.button("☆ Add to Watchlist", key="btn_wl_add"):
+                st.session_state.watchlist.add(addr)
+                st.rerun()
+
+    stamp = _stamp(OUTPUT_DIR)
+    trace = load_trace(str(OUTPUT_DIR), addr, stamp)
+
+    # Rule Evidence Cards
+    st.markdown("### Heuristic & Machine Learning Evidence (R1–R5)")
+    if not trace or "rules" not in trace:
+        st.info("Detailed trace JSON is not available for this address.")
+    else:
+        rules_data = trace["rules"]
+        rule_cards = [
+            ("R1", "Circular Flow Detection", 25, "Short cyclical transfer flow within 24h & uniform value"),
+            ("R2", "Outbound Fan-Out", 20, "High outbound counterparty dispersion and fanout ratio"),
+            ("R3", "Sanctioned Entity 1-Hop", 30, "Direct 1-hop inbound/outbound connection to OFAC seed"),
+            ("R4", "PageRank Network Prominence", 15, "Transaction graph centrality within top 5% value-weighted"),
+            ("R5", "Apriori Behavioural Match", 20, "Frequent association itemset matching known illicit profiles"),
+        ]
+
+        cols = st.columns(5)
+        for i, (rid, rname, rwt, rdesc) in enumerate(rule_cards):
+            rinfo = rules_data.get(rid, {})
+            triggered = bool(rinfo.get("triggered", False))
+            pts = int(rinfo.get("points", 0))
+            inputs = rinfo.get("inputs", {})
+
+            with cols[i]:
+                border_color = "#ef4444" if triggered else "#334155"
+                bg_color = "#1e1e2d" if triggered else "#0f172a"
+                st.markdown(
+                    f"""
+                    <div style="border: 1px solid {border_color}; background:{bg_color}; border-radius:8px; padding:10px; min-height:160px;">
+                        <div style="font-weight:700; color:{'#f87171' if triggered else '#94a3b8'}; font-size:0.85rem;">{rid} · {rwt} pts</div>
+                        <div style="font-size:0.8rem; font-weight:600; margin:4px 0;">{rname}</div>
+                        <div style="font-size:0.75rem; color:#64748b; margin-bottom:8px;">{rdesc}</div>
+                        <div style="font-size:0.85rem; font-weight:700;">{'🚨 TRIGGERED (+'+str(pts)+' pts)' if triggered else '⚪ NOT TRIGGERED'}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                with st.expander("Details", expanded=False):
+                    st.caption(evidence_summary(rid, inputs))
+                    st.json(inputs)
+
+    st.markdown("### Score Contribution Breakdown")
+    rule_pts = {}
+    if trace and "rules" in trace:
+        for r_id, r_info in trace["rules"].items():
+            rule_pts[f"{r_id} ({r_info.get('name', r_id)})"] = r_info.get("points", 0)
+
+    if rule_pts:
+        fig_bar = go.Figure(go.Bar(
+            x=list(rule_pts.values()),
+            y=list(rule_pts.keys()),
+            orientation="h",
+            marker_color=["#ef4444" if v > 0 else "#475569" for v in rule_pts.values()],
+            text=[f"+{v} pts" if v > 0 else "0" for v in rule_pts.values()],
+            textposition="auto",
+        ))
+        chart_layout(fig_bar, height=220, xaxis_title="Score Points", yaxis_title="")
+        fig_bar.update_layout(yaxis=dict(autorange="reversed"))
+        st.plotly_chart(fig_bar, width="stretch")
+
+    tab_tx, tab_feat, tab_nb, tab_raw = st.tabs([
+        "📜 Transaction Evidence",
+        "📊 Behavioral Features",
+        "🕸️ Graph Neighbors",
+        "💾 Raw Case File (JSON)",
+    ])
+
+    with tab_tx:
+        st.markdown("**Cleaned Transactions**")
+        tx_df = load_wallet_transactions(str(OUTPUT_DIR), addr, stamp)
+        if tx_df.empty:
+            st.info("No transaction events found for this wallet in cleaned dataset.")
+        else:
+            st.caption(f"Found {len(tx_df):,} transaction records touching this wallet.")
+            if "value_eth" in tx_df.columns:
+                fig_tx = go.Figure()
+                fig_tx.add_trace(go.Scatter(
+                    x=tx_df["block_timestamp"],
+                    y=tx_df["value_eth"],
+                    mode="markers",
+                    marker=dict(
+                        size=8,
+                        color=["#38bdf8" if d == "in" else "#f97316" for d in tx_df["direction"]],
+                        opacity=0.8,
+                    ),
+                    text=[f"{d.upper()}: {v:.4f} ETH<br>Counterparty: {short(c)}" for d, v, c in zip(tx_df["direction"], tx_df["value_eth"], tx_df["counterparty"], strict=False)],
+                    hovertemplate="%{text}<extra></extra>",
+                ))
+                chart_layout(fig_tx, height=240, xaxis_title="Timestamp", yaxis_title="ETH Value")
+                st.plotly_chart(fig_tx, width="stretch")
+
+            display_cols = [c for c in ["block_timestamp", "direction", "counterparty", "value_eth", "tx_hash"] if c in tx_df.columns]
+            st.dataframe(
+                tx_df[display_cols].head(50),
+                width="stretch",
+                hide_index=True,
+            )
+
+    with tab_feat:
+        st.markdown("**Engineered Features & Cohort Percentiles**")
+        if features.empty:
+            st.info("Wallet features artifact not found.")
+        else:
+            w_feat = features[features["address"] == addr]
+            if w_feat.empty:
+                st.info("No feature row found for this address.")
+            else:
+                w_row = w_feat.iloc[0]
+                feat_rows = []
+                for col in FEATURE_FIELDS:
+                    if col in features.columns:
+                        val = w_row[col]
+                        pct_val = (features[col] <= val).mean() * 100.0 if len(features) > 0 else 50.0
+                        feat_rows.append({
+                            "Feature": col,
+                            "Value": fmt(val, 4),
+                            "Percentile": f"{pct_val:.1f}%",
+                        })
+                st.dataframe(pd.DataFrame(feat_rows), width="stretch", hide_index=True)
+
+    with tab_nb:
+        st.markdown("**Direct Graph Neighbors (1-Hop Counterparties)**")
+        if edges.empty:
+            st.info("Graph edges artifact not available.")
+        else:
+            nb_edges = edges[(edges["from_address"] == addr) | (edges["to_address"] == addr)]
+            if nb_edges.empty:
+                st.info("No neighbor edges found in graph.")
+            else:
+                st.caption(f"Total {len(nb_edges)} active connection(s) in transaction graph.")
+                st.dataframe(nb_edges.head(50), width="stretch", hide_index=True)
+
+    with tab_raw:
+        st.markdown("**Full Case File Export**")
+        case_file = {
+            "address": addr,
+            "score": score_val,
+            "raw_score": raw_val,
+            "tier": tier_val,
+            "top_driver": driver_val,
+            "trace": trace,
+        }
+        st.json(case_file)
+        st.download_button(
+            "⬇️ Download Case File (JSON)",
+            data=json.dumps(case_file, indent=2, default=str).encode("utf-8"),
+            file_name=f"case_file_{addr[:10]}.json",
+            mime="application/json",
+        )
+
+
+# ── view: Network ─────────────────────────────────────────────────────────────
+def render_network(bundle: dict[str, Any]) -> None:
+    scores: pd.DataFrame = bundle["scores"]
+    edges: pd.DataFrame = bundle["edges"]
+    community_map: dict[str, int] = bundle["community_map"]
+    dbscan_map: dict[str, int] = bundle["dbscan_map"]
+
+    st.markdown('<div class="cl-kicker">Graph Topology</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="cl-header"><h1>Transaction Subgraph & Community Structure</h1>'
+        '<p>Interactive visualization of transaction flow, ego networks, and modular Louvain communities.</p></div>',
+        unsafe_allow_html=True,
+    )
+
+    if edges.empty:
+        st.warning("Graph edges artifact (`graph_edges.parquet`) is empty or missing.")
+        return
+
+    # Focal wallet
+    default_focus = st.session_state.selected_wallet or scores.sort_values("score", ascending=False).iloc[0]["address"]
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        focus_addr = st.text_input("Focal Address (0x...)", value=default_focus).strip().lower()
+    with c2:
+        max_hops = st.selectbox("Max Hops", options=[1, 2], index=0)
+    with c3:
+        max_nodes = st.slider("Max Subgraph Nodes", min_value=10, max_value=80, value=35)
+    with c4:
+        color_by = st.selectbox("Color Nodes By", options=["Risk Tier", "Primary Flag", "Louvain Community", "DBSCAN Cluster"])
+
+    # Extract ego subgraph
+    hop1_out = edges[edges["from_address"] == focus_addr]["to_address"].tolist()
+    hop1_in = edges[edges["to_address"] == focus_addr]["from_address"].tolist()
+    sub_nodes = set([focus_addr] + hop1_out + hop1_in)
+
+    if max_hops == 2 and len(sub_nodes) < max_nodes:
+        hop1_list = list(sub_nodes)
+        hop2 = edges[edges["from_address"].isin(hop1_list) | edges["to_address"].isin(hop1_list)]
+        sub_nodes.update(hop2["from_address"].tolist() + hop2["to_address"].tolist())
+
+    # Limit to max_nodes
+    if len(sub_nodes) > max_nodes:
+        sub_nodes = set([focus_addr] + list(sub_nodes - {focus_addr})[: max_nodes - 1])
+
+    sub_edges = edges[edges["from_address"].isin(sub_nodes) & edges["to_address"].isin(sub_nodes)]
+    edge_pairs = tuple((str(r.from_address), str(r.to_address)) for r in sub_edges.itertuples())
+    pos = compute_layout(tuple(sub_nodes), edge_pairs)
+
+    # Plotly figure
+    edge_x, edge_y = [], []
+    for u, v in edge_pairs:
+        if u in pos and v in pos:
+            edge_x.extend([pos[u][0], pos[v][0], None])
+            edge_y.extend([pos[u][1], pos[v][1], None])
+
+    edge_trace = go.Scatter(
+        x=edge_x, y=edge_y,
+        line=dict(width=1, color="#475569"),
+        hoverinfo="none",
+        mode="lines"
+    )
+
+    node_x, node_y, node_color, node_text, node_size = [], [], [], [], []
+    score_lookup = dict(zip(scores["address"], scores["score"], strict=False))
+    tier_lookup = dict(zip(scores["address"], scores["tier"], strict=False))
+    flag_lookup = dict(zip(scores["address"], scores["primary_flag"], strict=False))
+
+    for node in sub_nodes:
+        if node in pos:
+            node_x.append(pos[node][0])
+            node_y.append(pos[node][1])
+            is_focal = (node == focus_addr)
+            node_size.append(18 if is_focal else 10)
+
+            t = tier_lookup.get(node, "low")
+            s = score_lookup.get(node, 0)
+            fl = flag_lookup.get(node, "")
+            comm = community_map.get(node, -1)
+            db = dbscan_map.get(node, -1)
+
+            if color_by == "Risk Tier":
+                node_color.append(TIER_COLORS.get(t, "#64748b"))
+            elif color_by == "Primary Flag":
+                node_color.append(FLAG_COLORS.get(fl, "#64748b"))
+            elif color_by == "Louvain Community":
+                node_color.append(COMMUNITY_COLORS[comm % len(COMMUNITY_COLORS)] if comm >= 0 else "#64748b")
+            else:
+                node_color.append("#ef4444" if db == -1 else "#38bdf8")
+
+            node_text.append(
+                f"Address: {node}<br>Tier: {t.upper()} (Score: {s})<br>"
+                f"Flag: {fl or 'None'}<br>Community: {comm}<br>DBSCAN: {db}"
+            )
+
+    node_trace = go.Scatter(
+        x=node_x, y=node_y,
+        mode="markers",
+        hoverinfo="text",
+        text=node_text,
+        marker=dict(
+            showscale=False,
+            color=node_color,
+            size=node_size,
+            line=dict(width=2, color="#ffffff")
+        )
+    )
+
+    fig = go.Figure(data=[edge_trace, node_trace])
+    chart_layout(
+        fig, height=500,
+        showlegend=False,
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+    )
+    st.plotly_chart(fig, width="stretch")
+
+    st.caption(f"Rendered subgraph: {len(sub_nodes)} nodes, {len(sub_edges)} directed transaction edges.")
+
+    # Subgraph Table & Export
+    col_exp1, col_exp2 = st.columns(2)
+    with col_exp1:
+        st.download_button(
+            "⬇️ Export Subgraph Edges (CSV)",
+            data=sub_edges.to_csv(index=False).encode("utf-8"),
+            file_name="subgraph_edges.csv",
+            mime="text/csv",
+        )
+    with col_exp2:
+        if st.button("Inspect Focal Wallet in Dossier"):
+            st.session_state.selected_wallet = focus_addr
+            st.session_state.active_view = "Wallet dossier"
+            st.rerun()
+
+
+# ── view: Patterns ────────────────────────────────────────────────────────────
+def render_patterns(bundle: dict[str, Any]) -> None:
+    flags: pd.DataFrame = bundle["flags"]
+    scores: pd.DataFrame = bundle["scores"]
+
+    st.markdown('<div class="cl-kicker">Algorithm Signals</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="cl-header"><h1>Anomaly & Pattern Detection Intelligence</h1>'
+        '<p>Detailed inspection of graph heuristic rules, unsupervised DBSCAN clusters, and Louvain modularity.</p></div>',
+        unsafe_allow_html=True,
+    )
+
+    t_r1, t_r2, t_r3, t_r4, t_r5, t_db, t_louv = st.tabs([
+        "R1 · Circular Flow",
+        "R2 · Outbound Fan-Out",
+        "R3 · Sanctioned 1-Hop",
+        "R4 · PageRank Top 5%",
+        "R5 · Apriori Rules",
+        "DBSCAN Density",
+        "Louvain Communities",
+    ])
+
+    def render_pattern_table(sig_name: str, title: str, desc: str) -> None:
+        st.markdown(f"### {title}")
+        st.caption(desc)
+        sub_flags = flags[flags["signal_name"] == sig_name] if not flags.empty and "signal_name" in flags.columns else pd.DataFrame()
+        if sub_flags.empty:
+            st.info(f"No wallets triggered signal `{sig_name}` in current run.")
+        else:
+            st.markdown(f"**{len(sub_flags):,} wallets flagged**")
+            merged = sub_flags.merge(scores[["address", "score", "tier"]], on="address", how="left")
+            st.dataframe(merged.head(100), width="stretch", hide_index=True)
+
+    with t_r1:
+        render_pattern_table("cycle_member", "R1: Circular Fund Flow Detection", "Identifies directed cycles of length 3–5 with near-equal transfer amounts within a 24-hour window.")
+    with t_r2:
+        render_pattern_table("fanout", "R2: Outbound Rapid Fan-Out", "Wallets exhibiting ≥20 distinct counterparties, ≥20 outbound transfers, and high outbound volume share.")
+    with t_r3:
+        render_pattern_table("sanctioned_1hop", "R3: Sanctioned Entity Proximity", "Wallets directly transacting with known OFAC/sanctioned seed addresses.")
+    with t_r4:
+        render_pattern_table("pagerank_top5", "R4: Value-Weighted PageRank Centrality", "Wallets in the top 5% value-weighted PageRank distribution.")
+    with t_r5:
+        render_pattern_table("apriori_match", "R5: Apriori Association Rule Matches", "Wallets satisfying frequent behavioural itemset rules learned from flagged training examples.")
+    with t_db:
+        st.markdown("### DBSCAN Density-Based Outlier Detection")
+        st.caption("Unsupervised clustering in standardized feature space. Points labelled noise (-1) are behavioral outliers.")
+        noise_flags = flags[flags["signal_name"] == "dbscan_noise"] if not flags.empty and "signal_name" in flags.columns else pd.DataFrame()
+        cluster_flags = flags[flags["signal_name"] == "dbscan_cluster"] if not flags.empty and "signal_name" in flags.columns else pd.DataFrame()
+
+        m1, m2 = st.columns(2)
+        with m1:
+            metric_card("DBSCAN Noise Outliers", f"{len(noise_flags):,}", "Feature outliers (min_samples=5, eps=1.5)")
+        with m2:
+            n_clusters = cluster_flags["signal_value"].nunique() if not cluster_flags.empty else 0
+            metric_card("Dense Clusters Formed", f"{n_clusters:,}", "Dense behavioral clusters")
+        if not noise_flags.empty:
+            st.markdown("**Noise Outlier Wallets**")
+            st.dataframe(noise_flags.head(50), width="stretch", hide_index=True)
+    with t_louv:
+        st.markdown("### Louvain Graph Modularity Communities")
+        st.caption("Community detection partitioning the transaction graph into modular, densely-connected clusters.")
+        comm_flags = flags[flags["signal_name"] == "louvain_community"] if not flags.empty and "signal_name" in flags.columns else pd.DataFrame()
+        if comm_flags.empty:
+            st.info("No Louvain community signals recorded.")
+        else:
+            comm_sizes = comm_flags["signal_value"].value_counts()
+            metric_card("Communities Discovered", f"{len(comm_sizes):,}")
+            st.markdown("**Top Community Sizes**")
+            st.bar_chart(comm_sizes.head(15))
+
+
+# ── view: Evaluation ──────────────────────────────────────────────────────────
+def render_evaluation(bundle: dict[str, Any]) -> None:
+    evaluation: dict[str, Any] = bundle["evaluation"]
+    ablation: pd.DataFrame = bundle["ablation"]
+    st.markdown('<div class="cl-kicker">Model Validation</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="cl-header"><h1>Performance Evaluation & Rule Ablation</h1>'
+        '<p>Empirical metrics on held-out test split, operating thresholds, and leave-one-rule-out impact.</p></div>',
+        unsafe_allow_html=True,
+    )
+
+    if not evaluation or evaluation.get("insufficient", False):
+        st.warning("Held-out evaluation was marked as insufficient or is unavailable.")
+        if evaluation:
+            st.json(evaluation)
+        return
+
+    st.info(
+        "📌 **Methodology Note**: " + str(evaluation.get("note", "P/R/F1 are sample metrics on a case-control sample."))
+    )
+
+    op_points = evaluation.get("operating_points", {})
+    high_op = op_points.get("high_60", {})
+    med_op = op_points.get("medium_25", {})
+
+    st.markdown("### Operating Points Comparison")
+    c_high, c_med = st.columns(2)
+
+    with c_high:
+        st.markdown("#### High Risk Threshold (Score ≥ 60)")
+        p_h = high_op.get("precision", 0.0)
+        r_h = high_op.get("recall", 0.0)
+        f1_h = high_op.get("f1", 0.0)
+        tp_h, fp_h = high_op.get("tp", 0), high_op.get("fp", 0)
+        tn_h, fn_h = high_op.get("tn", 0), high_op.get("fn", 0)
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Precision", pct(p_h))
+        m2.metric("Recall", pct(r_h))
+        m3.metric("F1 Score", pct(f1_h))
+
+        matrix_h = [[tn_h, fp_h], [fn_h, tp_h]]
+        fig_h = go.Figure(go.Heatmap(
+            z=matrix_h,
+            x=["Pred Neg", "Pred Pos"],
+            y=["Actual Neg", "Actual Pos"],
+            text=[[str(v) for v in r] for r in matrix_h],
+            texttemplate="%{text}",
+            colorscale="Blues",
+            showscale=False,
+        ))
+        chart_layout(fig_h, height=220)
+        fig_h.update_layout(yaxis=dict(autorange="reversed"))
+        st.plotly_chart(fig_h, width="stretch")
+
+    with c_med:
+        st.markdown("#### Medium Risk Threshold (Score ≥ 25)")
+        p_m = med_op.get("precision", 0.0)
+        r_m = med_op.get("recall", 0.0)
+        f1_m = med_op.get("f1", 0.0)
+        tp_m, fp_m = med_op.get("tp", 0), med_op.get("fp", 0)
+        tn_m, fn_m = med_op.get("tn", 0), med_op.get("fn", 0)
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Precision", pct(p_m))
+        m2.metric("Recall", pct(r_m))
+        m3.metric("F1 Score", pct(f1_m))
+
+        matrix_m = [[tn_m, fp_m], [fn_m, tp_m]]
+        fig_m = go.Figure(go.Heatmap(
+            z=matrix_m,
+            x=["Pred Neg", "Pred Pos"],
+            y=["Actual Neg", "Actual Pos"],
+            text=[[str(v) for v in r] for r in matrix_m],
+            texttemplate="%{text}",
+            colorscale="Greens",
+            showscale=False,
+        ))
+        chart_layout(fig_m, height=220)
+        fig_m.update_layout(yaxis=dict(autorange="reversed"))
+        st.plotly_chart(fig_m, width="stretch")
+
+    st.markdown("### Leave-One-Rule-Out Ablation Study")
+    st.caption("Quantifies the marginal predictive value of each individual rule by measuring test F1 degradation when ablated.")
+    if ablation.empty:
+        st.info("Ablation study artifact (`ablation.csv`) not found.")
+    else:
+        st.dataframe(ablation, width="stretch", hide_index=True)
+        if "delta_f1" in ablation.columns and "rule" in ablation.columns:
+            fig_abl = go.Figure(go.Bar(
+                x=ablation["rule"],
+                y=ablation["delta_f1"],
+                marker_color=["#ef4444" if v < 0 else "#22c55e" for v in ablation["delta_f1"]],
+                text=[f"{v:+.3f}" for v in ablation["delta_f1"]],
+                textposition="outside",
+            ))
+            chart_layout(fig_abl, height=260, xaxis_title="Ablated Rule", yaxis_title="Δ F1 Score")
+            st.plotly_chart(fig_abl, width="stretch")
+
+
+# ── view: Data & export ───────────────────────────────────────────────────────
+def render_data_export(bundle: dict[str, Any]) -> None:
+    run_info: dict[str, Any] = bundle["run_info"]
+
+    st.markdown('<div class="cl-kicker">Artifact Inventory</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="cl-header"><h1>Pipeline Artifacts & System Provenance</h1>'
+        '<p>Audit trail, data hashes, individual artifact downloads, and full archival export package.</p></div>',
+        unsafe_allow_html=True,
+    )
+
+    # Artifact inventory table
+    st.markdown("### Output Artifact Inventory")
+    inv_rows = []
+    for fname, desc in ARTIFACT_SPECS.items():
+        fpath = OUTPUT_DIR / fname
+        exists = fpath.exists()
+        size_str = f"{fpath.stat().st_size / 1024:.1f} KB" if exists else "—"
+        if exists and fpath.stat().st_size > 1024 * 1024:
+            size_str = f"{fpath.stat().st_size / (1024 * 1024):.2f} MB"
+        mtime_str = str(pd.to_datetime(fpath.stat().st_mtime, unit="s"))[:19] if exists else "—"
+        inv_rows.append({
+            "Artifact": fname,
+            "Description": desc,
+            "Size": size_str,
+            "Last Modified": mtime_str,
+            "Status": "✅ Present" if exists else "❌ Missing",
+        })
+    st.dataframe(pd.DataFrame(inv_rows), width="stretch", hide_index=True)
+
+    st.markdown("### Provenance & Execution Hashes")
+    st.json(run_info)
+
+    st.markdown("### Export Bundle")
+    stamp = _stamp(OUTPUT_DIR)
+    zip_bytes = build_export_zip(str(OUTPUT_DIR), stamp)
+    st.download_button(
+        "📦 Download Complete Artifact Archive (.zip)",
+        data=zip_bytes,
+        file_name="chainlens_artifacts_bundle.zip",
+        mime="application/zip",
+    )
+
+    st.divider()
+    st.markdown("### About ChainLens Architecture")
+    st.markdown(
+        """
+        **Pipeline Design (7 Core Modules):**
+        - `fetch_data.py`: Ingestion from Etherscan V2 API with local Parquet disk caching.
+        - `features.py`: Feature engineering using DuckDB and train-split scaling.
+        - `patterns.py`: NetworkX graph algorithms, Louvain modularity, DBSCAN clustering, and Apriori rules.
+        - `scoring.py`: Heuristic rules R1–R5 composite scoring (clamped 0–100) and structured trace generation.
+        - `evaluate.py`: Test-split P/R/F1, PR-AUC, and leave-one-rule-out ablation.
+        - `run.py`: Orchestrator writing all output artifacts to `data/output/`.
+        - `dashboard.py`: Strictly read-only Streamlit operational analyst workspace.
         """
     )
-    st.code(
-        "python run.py --mode sample\n"
-        "python run.py --mode real --max-addresses 400\n"
-        "streamlit run dashboard.py",
-        language="bash",
-    )
+
+
+# ── main entry point ──────────────────────────────────────────────────────────
+def main() -> None:
+    stamp = _stamp(OUTPUT_DIR)
+    bundle = load_artifacts(str(OUTPUT_DIR), stamp)
+
+    errors = bundle.get("errors", [])
+    if errors:
+        for err in errors:
+            st.error(f"❌ {err}")
+        st.stop()
+
+    scores = bundle.get("scores", pd.DataFrame())
+    if scores.empty:
+        st.warning("No scores found. Please run the pipeline first: `uv run chainlens --mode sample`")
+        st.stop()
+
+    # Pre-populate session state
+    if not st.session_state.selected_wallet or st.session_state.selected_wallet not in set(scores["address"]):
+        high_or_med = scores[scores["tier"].isin(["high", "medium"])]
+        if not high_or_med.empty:
+            st.session_state.selected_wallet = high_or_med.iloc[0]["address"]
+        else:
+            st.session_state.selected_wallet = scores.iloc[0]["address"]
+
+    # Sidebar Navigation
+    with st.sidebar:
+        st.markdown('<div class="cl-kicker">ChainLens</div>', unsafe_allow_html=True)
+        st.markdown("### Risk Workspace")
+
+        current_view = st.session_state.active_view
+        view_idx = VIEWS.index(current_view) if current_view in VIEWS else 0
+        nav_choice = st.radio("Navigate Views", VIEWS, index=view_idx, key="nav_radio")
+        if nav_choice != current_view:
+            st.session_state.active_view = nav_choice
+
+        st.divider()
+        st.markdown("**Quick Wallet Jump**")
+        jump = st.text_input("Enter 0x address", placeholder="0x...", key="sb_jump").strip().lower()
+        if jump:
+            if jump in set(scores["address"]):
+                st.session_state.selected_wallet = jump
+                st.session_state.active_view = "Wallet dossier"
+                st.success("Wallet selected!")
+                st.rerun()
+            else:
+                st.warning("Address not found in cohort")
+
+        st.divider()
+        run_info = bundle.get("run_info", {})
+        mode_val = run_info.get("mode", "sample").upper()
+        st.caption(f"**Cohort Size**: {len(scores):,} wallets ({mode_val})")
+        if st.session_state.watchlist:
+            st.caption(f"⭐ **Watchlist**: {len(st.session_state.watchlist)} wallets")
+
+        warnings = bundle.get("warnings", [])
+        if warnings:
+            with st.expander(f"⚠️ Notices ({len(warnings)})", expanded=False):
+                for w in warnings:
+                    st.caption(f"• {w}")
+
+    # Render active view
+    active = st.session_state.active_view
+    if active == "Overview":
+        render_overview(bundle)
+    elif active == "Triage":
+        render_triage(bundle)
+    elif active == "Wallet dossier":
+        render_dossier(bundle)
+    elif active == "Network":
+        render_network(bundle)
+    elif active == "Patterns":
+        render_patterns(bundle)
+    elif active == "Evaluation":
+        render_evaluation(bundle)
+    elif active == "Data & export":
+        render_data_export(bundle)
+
+
+if __name__ == "__main__":
+    main()

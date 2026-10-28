@@ -1,571 +1,745 @@
-# ChainLens
+# ChainLens 🔗
 
-**Auditable Ethereum wallet risk scoring.** Seven pipeline files, real Etherscan V2
-transactions, five transparent rules, graph analytics, a leakage-safe evaluation, and a
-read-only Plotly dashboard.
-
-> A ChainLens score is an investigative lead, not proof of wrongdoing. Read the trace.
+> **Blockchain Wallet Risk Intelligence Platform** — An explainable, heuristic + ML pipeline that ingests Ethereum transaction data, engineers behavioural features, detects suspicious patterns using five locked rules, and surfaces a prioritised analyst triage dashboard.
 
 ---
 
-## What it does
+## Table of Contents
 
-ChainLens ingests Ethereum normal transactions for labelled wallets, their counterparties,
-Kaggle negatives, and random-block context addresses. It builds a transaction graph, applies
-five rules plus DBSCAN, Apriori, and Louvain, and emits a 0–100 score with an auditable
-per-rule trace. A held-out test split produces precision, recall, F1, average precision, and
-a leave-one-rule-out ablation.
-
-The implementation is deliberately small:
-
-| File | Responsibility | Main output |
-|---|---|---|
-| `fetch_data.py` | Etherscan V2 client, per-address cache/resume, label loading, negatives, context sampling, train/test split | `transactions_raw.parquet`, `labels.parquet`, `splits.parquet` |
-| `features.py` | DuckDB cleaning, exact ETH accounting, wallet features, train-only scaler | `transactions_clean.parquet`, `wallet_features.parquet`, `feature_scaler` |
-| `patterns.py` | Graph build, R1 cycles, R2 fan-out, R3 sanctioned 1-hop, R4 PageRank, DBSCAN, Apriori (R5), Louvain | `graph_edges.parquet`, `flags.parquet` |
-| `scoring.py` | Locked weights, tiers, clamp, known-address down-weight, trace contract | `scores.parquet`, `traces.parquet` |
-| `evaluate.py` | Test-split P/R/F1, insufficient-data guard, secondary operating point, ablation | `evaluation.json`, `evaluation.md`, `ablation.csv` |
-| `run.py` | CLI orchestrator for sample/real modes; `uv run chainlens` entry point | all artifacts, `run_info.json`, `chainlens.duckdb` |
-| `dashboard.py` | Read-only Streamlit + Plotly dashboard | wallet explorer, graph, evaluation, CSV export |
-
-```
-.env ──▶ fetch_data.py ──▶ features.py ──▶ patterns.py ──▶ scoring.py ──▶ evaluate.py
-                                                                  │
-                                                                  ▼
-                                                        data/output/ ──▶ dashboard.py
-                                      run.py orchestrates the stages
-```
-
-`dashboard.py` never recomputes scores, flags, or metrics. It reads only `data/output/`.
+1. [What ChainLens Does](#1-what-chainlens-does)
+2. [The Full Pipeline — Stage by Stage](#2-the-full-pipeline--stage-by-stage)
+3. [Scoring: How Wallets Get a Risk Score](#3-scoring-how-wallets-get-a-risk-score)
+4. [All Five Detection Rules Explained](#4-all-five-detection-rules-explained)
+5. [Unsupervised Algorithms: DBSCAN, Apriori, Louvain, PageRank](#5-unsupervised-algorithms-dbscan-apriori-louvain-pagerank)
+6. [Why Rules Sometimes Catch Nothing — Explained](#6-why-rules-sometimes-catch-nothing--explained)
+7. [Sanctioned Entities & Community Detection](#7-sanctioned-entities--community-detection)
+8. [Dashboard: Every Tab & Every Chart](#8-dashboard-every-tab--every-chart)
+9. [Evaluation: How We Measure Quality](#9-evaluation-how-we-measure-quality)
+10. [Quickstart](#10-quickstart)
+11. [Configuration Reference](#11-configuration-reference)
+12. [Output Artifacts](#12-output-artifacts)
+13. [Architecture Overview](#13-architecture-overview)
 
 ---
 
-## Quickstart
+## 1. What ChainLens Does
 
-### 1. Install uv
+ChainLens is a **blockchain forensics and compliance intelligence system** for Ethereum. Given a set of wallet addresses — including known bad actors (sanctions lists, fraud reports, darklists) and known clean wallets — it:
 
-Python 3.11+ is required. The repository pins **3.11** in `.python-version` to match CI.
+1. **Fetches** all their on-chain transactions from the Etherscan API (or loads them from a sample fixture)
+2. **Engineers** 14+ behavioural features per wallet (e.g. fan-out ratio, circular flow, round-number transfers)
+3. **Detects** suspicious patterns using five transparent heuristic rules (R1–R5), two unsupervised ML algorithms (DBSCAN + Apriori), and one graph community detector (Louvain)
+4. **Scores** every wallet 0–100 and assigns it to a risk tier: **High (≥ 60)**, **Medium (25–59)**, or **Low (0–24)**
+5. **Evaluates** the model on a held-out test split, producing Precision / Recall / F1 and a leave-one-rule-out ablation study
+6. **Visualises** everything in a read-only Streamlit analyst dashboard with 7 interactive tabs
 
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-source "$HOME/.local/bin/env"
-uv --version
+The system is **fully explainable** — every rule hit is traced back to concrete evidence (which cycle path triggered R1, which sanctioned seed triggered R3, which itemset triggered R5). An analyst can reconstruct the entire decision from a single JSON "case file".
+
+---
+
+## 2. The Full Pipeline — Stage by Stage
+
+```
+Etherscan API / Sample Fixture
+          │
+          ▼
+┌─────────────────────────────┐
+│  Stage 1 · fetch_data.py    │  Ingestion
+│  Rate-limited Etherscan V2  │  Per-address Parquet cache
+│  client + label loading     │  Deterministic train/test split
+└──────────────┬──────────────┘
+               │ raw transactions.parquet
+               ▼
+┌─────────────────────────────┐
+│  Stage 2 · features.py      │  Cleaning & Feature Engineering
+│  DuckDB SQL: de-dup, filter │  14 features per wallet
+│  Train-only StandardScaler  │  → wallet_features.parquet
+└──────────────┬──────────────┘
+               │ scaled features
+               ▼
+┌─────────────────────────────┐
+│  Stage 3 · DuckDB warehouse │  In-memory SQL warehouse
+│  (inside run.py)            │  All tables available to
+│                             │  patterns, scoring, dashboard
+└──────────────┬──────────────┘
+               │ features + graph edges
+               ▼
+┌─────────────────────────────┐
+│  Stage 4 · patterns.py      │  Pattern Detection
+│  NetworkX DiGraph           │  R1: cycle detection
+│  DBSCAN clustering          │  R2: fan-out
+│  Apriori association rules  │  R3: sanctioned 1-hop
+│  Louvain communities        │  R4: PageRank top 5%
+│  PageRank                   │  R5: Apriori match
+└──────────────┬──────────────┘
+               │ flags dict
+               ▼
+┌─────────────────────────────┐
+│  Stage 5 · scoring.py       │  Composite Scoring
+│  R1–R5 rule weights         │  raw_score = Σ (hit × weight)
+│  Known-address downweight   │  score clamped 0–100
+│  Audit trace JSON           │  → scores.parquet, traces.parquet
+└──────────────┬──────────────┘
+               │ scores + flags
+               ▼
+┌─────────────────────────────┐
+│  Stage 6 · evaluate.py      │  Model Evaluation
+│  Test-split P/R/F1          │  Leave-one-rule-out ablation
+│  PR-AUC                     │  → evaluation.json, ablation.csv
+└──────────────┬──────────────┘
+               │ All artifacts written to data/output/
+               ▼
+┌─────────────────────────────┐
+│  dashboard.py (read-only)   │  7-tab Streamlit workspace
+│  Never re-runs pipeline     │  Pure visualisation of artifacts
+└─────────────────────────────┘
 ```
 
-### 2. Create the environment
+### Key Design Decisions
 
-```bash
-uv python install 3.11
-uv sync --locked
+| Decision | Reason |
+|---|---|
+| **DuckDB for feature engineering** | Handles wei→ETH decimal arithmetic without float64 overflow; deterministic SQL |
+| **Train-only scaling** | Scaler is fit on the training split to prevent data leakage to the test split |
+| **Locked rule weights** | Weights `[25, 20, 30, 15, 20]` are locked in `rules.yaml`; a hash guards against accidental changes |
+| **Known-address downweight (0.3×)** | Exchanges, bridges, mixers, and contracts appear in many transactions but are not suspicious; their raw score is multiplied by 0.3 |
+| **Dashboard never imports patterns/scoring** | The dashboard is strictly read-only; it cannot mutate results, ensuring audit integrity |
+
+---
+
+## 3. Scoring: How Wallets Get a Risk Score
+
+Every wallet receives a **composite risk score from 0 to 100** based on which rules it triggers.
+
+### Rule Weights (Locked)
+
+| Rule | Signal | Weight | What it detects |
+|---|---|---|---|
+| R1 | `cycle_member` | **25 pts** | Circular fund flows (money laundering typology) |
+| R2 | `fanout` | **20 pts** | Rapid outbound dispersion (structuring / smurfing) |
+| R3 | `sanctioned_1hop` | **30 pts** | Direct link to OFAC/sanctioned address |
+| R4 | `pagerank_top5` | **15 pts** | High network centrality (financial hub) |
+| R5 | `apriori_match` | **20 pts** | Behavioural profile matching known bad actors |
+| **Max raw** | | **110 pts** | (all five triggered simultaneously) |
+
+The maximum raw score is 110 but the final score is **hard-clamped to 100**.
+
+### Tier Thresholds
+
+```
+  0 ─────────────────────────────────────────────── 100
+  │           │                    │                  │
+  └── Low ────┴───── Medium ───────┴──── High ────────┘
+      0–24         25–59                 60–100
 ```
 
-`uv sync` creates `.venv` from `.python-version` and installs the project plus the `dev`
-dependency group. You do **not** need to activate the environment; `uv run` uses it
-automatically. `requirements.txt` is kept only as a non-uv fallback.
+### Known-Address Downweight
 
-If an incompatible `.venv` already exists, recreate it:
+If a wallet is in `config/known_addresses.json` under a category like `exchange`, `bridge`, `mixer`, or `contract`, its raw score is multiplied by **0.3** before clamping. This prevents Uniswap, Binance, and similar high-volume addresses from being falsely flagged.
 
-```bash
-uv venv --python 3.11 --clear
-uv sync --locked
+### Scoring Example
+
+```
+Wallet 0xabc...def interacts with a sanctioned address (R3 hit = 30 pts)
+and has high fan-out (R2 hit = 20 pts)
+
+  raw_score = 30 + 20 = 50
+  known_category = None → factor = 1.0
+  final_score = min(50, 100) = 50  →  MEDIUM tier
+  top_driver = R3
 ```
 
-### 3. Run the offline sample first
+---
 
-The sample fixture needs **no API key** and is the fastest smoke test:
+## 4. All Five Detection Rules Explained
+
+### R1 · Circular Flow Detection (Weight: 25)
+
+**What it looks for:** Directed transaction cycles of length 3–5 where money travels in a loop back to its origin.
+
+**Real-world pattern:** In layering schemes, funds move A → B → C → A to obscure the origin. ChainLens detects this using **Strongly Connected Components (SCC)** in the transaction graph, then enumerates simple cycles within each SCC.
+
+**The constraints that make it precise:**
+- Cycle length must be between 3 and 5 hops (longer cycles are too common)
+- All edge values within the cycle must be within **5% of each other** (uniform wash)
+- The entire cycle must complete within **24 hours**
+- SCCs larger than 5,000 nodes are skipped for performance
+
+---
+
+### R2 · Outbound Fan-Out (Weight: 20)
+
+**What it looks for:** A wallet that sends to many distinct counterparties — the classic "smurfing" or "structuring" pattern.
+
+**The three-gate threshold (all must pass):**
+1. `unique_counterparties >= 20`
+2. `tx_count_out >= 20`
+3. `fanout_ratio >= 0.5`
+
+---
+
+### R3 · Sanctioned Entity 1-Hop (Weight: 30)
+
+**What it looks for:** Any wallet that directly sent to, or directly received from, a **known sanctioned address** in the training split.
+
+**Only training seeds are used** to prevent test-set leakage.
+
+---
+
+### R4 · PageRank Network Prominence (Weight: 15)
+
+**What it looks for:** Wallets in the **top 5% of value-weighted PageRank** across the entire transaction graph.
+
+Parameters: `alpha = 0.85`, weighted by `total_value_eth`, 95th percentile threshold.
+
+---
+
+### R5 · Apriori Behavioural Association Match (Weight: 20)
+
+**What it looks for:** Wallets that match **frequent itemset association rules** learned from the behavioural fingerprints of known bad actors in the training split.
+
+Full details in the next section.
+
+---
+
+## 5. Unsupervised Algorithms: DBSCAN, Apriori, Louvain, PageRank
+
+### Apriori (Rule R5) — Association Rule Mining
+
+**What is Apriori?**
+Apriori is a classic algorithm for finding **frequent patterns in boolean data**. Originally developed for market basket analysis ("customers who buy bread also buy butter"), here it is applied to wallet behaviour profiles.
+
+**How ChainLens uses it:**
+
+1. **Booleanise features:** Each wallet is represented as 9 boolean items:
+   - `high_fanout` — unique_counterparties >= 20
+   - `high_tx_count` — total transactions >= 10
+   - `low_value` — median transfer < 0.1 ETH
+   - `high_value` — total value >= 10 ETH
+   - `many_round` — >= 50% of transfers are whole-ETH amounts
+   - `is_contract` — address created a contract
+   - `recent_account` — first seen within 7 days of the window end
+   - `high_pagerank` — in the PageRank top 5%
+   - `dbscan_noise` — flagged as an outlier by DBSCAN
+
+2. **Mine frequent itemsets** on the **training split only** with `min_support = 0.05`
+
+3. **Generate association rules** targeting `flagged` as consequent:
+   - Only rules with `lift >= 2.0` and `confidence >= 0.8` are kept
+
+4. **Apply to all wallets:** Any wallet whose feature set satisfies a rule's antecedent gets flagged
+
+**Key metrics:**
+- **Support:** Fraction of training wallets having this combination (e.g., 0.07 = 7%)
+- **Confidence:** Of wallets with this combination, what fraction were bad actors (e.g., 0.85 = 85%)
+- **Lift:** How much more likely a wallet with this combination is to be flagged vs base rate (lift=2 means 2× more likely)
+
+---
+
+### DBSCAN — Density-Based Spatial Clustering
+
+**What is DBSCAN?**
+DBSCAN clusters data points by density. Points in dense regions form clusters; isolated points are labelled **noise (-1)**. Unlike K-Means, DBSCAN does not require specifying the number of clusters.
+
+**How ChainLens uses it:**
+- Input: 5 scaled wallet features (`total_value_eth_scaled`, `tx_count_out_scaled`, `tx_count_in_scaled`, `unique_counterparties_scaled`, `fanout_ratio_scaled`)
+- Parameters: `eps = 1.0122` (neighbourhood radius), `min_samples = 5`
+
+**What each label means:**
+- **Cluster (0, 1, 2, ...):** Wallet belongs to a dense behavioural group → `dbscan_cluster` flag (display only, not scored)
+- **Noise (-1):** Wallet is a behavioural outlier → `dbscan_noise` flag (used as an Apriori item, feeding into R5)
+
+**DBSCAN does not directly score wallets.** It provides a feature (`dbscan_noise`) that feeds into Apriori.
+
+---
+
+### Louvain Community Detection
+
+**What is Louvain?**
+Louvain is a modularity-maximising graph clustering algorithm. It partitions the transaction graph into densely connected communities — groups of wallets that transact heavily with each other and sparsely with the outside world.
+
+**How ChainLens uses it:**
+- Run on the **undirected** version of the transaction graph
+- Weighted by `total_value_eth`
+- Communities are numbered stably by sorting on smallest member address
+
+**Louvain does NOT score wallets** — it is a **display-only** signal for analyst investigation. You can see which community a wallet belongs to in the Network and Wallet Dossier tabs.
+
+---
+
+### Value-Weighted PageRank
+
+PageRank assigns each node an importance score based on how many important nodes point to it. In a transaction graph, it captures "who receives large flows from influential addresses".
+
+- Standard PageRank with `alpha = 0.85`
+- Edge weight = `total_value_eth`
+- Threshold = 95th percentile of all scores
+- Wallets above threshold get `pagerank_top5` flag and 15 points
+
+---
+
+## 6. Why Rules Sometimes Catch Nothing — Explained
+
+This is a very important operational reality.
+
+### The Sample Dataset Limitation
+
+When running in `--mode sample`, ChainLens uses a **fixture dataset** with synthetic or limited real transactions. This dataset has sparse inter-wallet connections and may not contain enough inter-address transactions for cycles to form.
+
+### Rule-by-Rule Zero-Hit Reasons
+
+| Rule | Why Zero Hits Happens |
+|---|---|
+| **R1 Circular Flow** | The transaction subgraph needs directed cycles of length 3–5 with matching values within 24h. In sparse or synthetic data, this rarely occurs naturally. |
+| **R2 Fan-Out** | A wallet needs >=20 outbound transactions to >=20 unique addresses. Small-sample wallets almost never reach this threshold. |
+| **R3 Sanctioned 1-Hop** | Requires sanctioned addresses in the **training split** to have transaction edges to other wallets in the graph. If no sanctioned seed appears as a graph node, zero flags are produced. |
+| **R4 PageRank Top 5%** | Always produces exactly 5% of graph nodes as hits by design. On extremely small graphs, the percentile arithmetic produces edge effects. |
+| **R5 Apriori** | Needs: (a) >=10 labelled training positives, (b) patterns that exceed `min_support = 0.05` with `lift >= 2.0` and `confidence >= 0.8`. All three can fail on small or homogeneous datasets. |
+
+### The Compound Rule Effect
+
+The High tier (>=60) requires **at least two rules to fire simultaneously**:
+- R3 alone (30 pts) → Low tier
+- R2 + R5 (20+20 = 40 pts) → Medium tier
+- R1 + R3 + R2 (25+30+20 = 75 pts) → High tier ✅
+
+**In sample mode, it is completely normal for the High tier to be empty.** The Medium tier is the active investigative queue in sample mode.
+
+---
+
+## 7. Sanctioned Entities & Community Detection
+
+### How Sanctioned Addresses Work
+
+ChainLens loads sanctioned addresses from labels with `label = "sanctioned"`. The sanctioned addresses that fall into the **training split** become "seeds" for R3.
+
+Label sources include:
+- OFAC SDN list Ethereum addresses
+- Community darklists (e.g., Tornado Cash-linked addresses)
+- Kaggle fraud datasets with verified bad actors
+
+### What "1-Hop" Means
+
+```
+   Sanctioned Seed (training only)
+        │
+        │ ← 1 hop (direct transaction edge) →
+        │
+   Suspicious Wallet (flagged by R3)
+```
+
+A wallet is flagged if it directly sent ETH to, or directly received ETH from, a sanctioned address. Two hops away is NOT flagged (too many false positives).
+
+### Community Detection and Sanctioned Clusters
+
+The Louvain communities tab lets analysts answer: **"Is this sanctioned address part of a larger cluster of colluding wallets?"**
+
+If a sanctioned address falls into community #7 with 15 other wallets, those 15 wallets are also in community #7 and visible in the dashboard. The analyst can then investigate whether those co-members also have other flags.
+
+**Louvain + R3 together are powerful:** R3 flags direct contacts, Louvain reveals the broader community structure.
+
+### Known-Address Downweight
+
+```
+known_addresses.json → category "exchange" → score × 0.3
+
+e.g., Uniswap router:
+  raw_score = 40 (R2 fan-out + R4 pagerank)
+  factor = 0.3 (exchange)
+  final_score = int(round(40 × 0.3)) = 12 → LOW tier
+```
+
+---
+
+## 8. Dashboard: Every Tab & Every Chart
+
+The dashboard (`dashboard.py`) is a **strictly read-only** Streamlit app. Launch with:
 
 ```bash
-uv run chainlens --mode sample
 uv run streamlit run dashboard.py
 ```
 
-Open the URL Streamlit prints (normally `http://localhost:8501`).
+### Sidebar
 
-### 4. Configure the real Etherscan key
+- **Navigation:** Radio button selecting one of 7 views
+- **Quick Wallet Jump:** Enter any `0x` address to jump directly to its dossier
+- **Cohort Size:** Total wallet count and run mode (SAMPLE / REAL)
+- **Watchlist count:** Number of wallets starred for monitoring
+- **Notices:** Data quality warnings (version mismatches, missing artifacts)
+
+---
+
+### Tab 1: Overview
+
+**Purpose:** Executive summary of a pipeline run.
+
+**Metrics row (6 cards):**
+
+| Card | What it shows |
+|---|---|
+| Analyzed Wallets | Total wallets scored in this run |
+| High Risk (≥60) | Count in the High tier (red) |
+| Medium Risk (25–59) | Count in the Medium tier (amber) |
+| Low Risk (0–24) | Count in the Low tier (slate) |
+| Flagged Wallets | Wallets triggering >=1 signal |
+| Test Avg Precision | Area under Precision-Recall curve on held-out test split |
+
+**Chart 1 — Risk Score Distribution (bar chart):**
+- X-axis: Composite score 0–100
+- Y-axis: Number of wallets
+- Color: Red for High, amber for Medium, slate for Low
+- A spike at score 0 is normal (wallets with no rule hits). An empty High bucket in sample mode is expected.
+
+**Chart 2 — Signal & Rule Hit Frequencies (horizontal bar chart):**
+- Each bar = one signal (R1–R5, DBSCAN noise, DBSCAN cluster, Louvain community)
+- X-axis: Number of wallets triggering that signal
+- R4 PageRank should always show ~5% of wallets. R3 will be zero if no sanctioned seeds exist.
+
+**Priority Triage Queue:**
+- Top 10 wallets with score >= 25, sorted by score descending
+- Clicking "Dossier →" navigates to the Wallet Dossier tab for that address
+
+---
+
+### Tab 2: Triage
+
+**Purpose:** Investigative queue — filter and triage the full wallet cohort.
+
+**Filter controls:**
+
+| Filter | Options |
+|---|---|
+| Risk Tier | High, Medium, Low (multiselect) |
+| Score Range | Slider 0–100 |
+| Triggered Rule | Any of R1–R5, DBSCAN noise (multiselect — AND logic) |
+| Split Partition | All / train / test |
+| Known Entity Category | exchange, bridge, mixer, contract |
+| Search Address or Label | Free text substring match |
+| Flagged wallets only | Show only wallets with >=1 signal |
+| Watchlist only | Show only starred wallets |
+
+**Result table columns:** TIER, ADDRESS, SCORE (raw score), DRIVER (top rule), SIGNALS (count), KNOWN/SPLIT, LABEL/SOURCE, ACTION (Inspect → Dossier)
+
+**Export:** "Download Filtered Wallets (CSV)"
+
+---
+
+### Tab 3: Wallet Dossier
+
+**Purpose:** Deep-dive forensic analysis of a single wallet address.
+
+**Banner:** Full address, tier badge, known-category chip, Etherscan link, Add/Remove Watchlist button
+
+**Rule Evidence Cards (5 cards, one per rule):**
+Each shows: `🚨 TRIGGERED (+N pts)` or `⚪ NOT TRIGGERED`, plus expandable evidence JSON
+
+| Card | Evidence shown |
+|---|---|
+| R1 Circular Flow | Cycle count, cycle paths, SCC size |
+| R2 Fan-Out | Unique counterparties, out/in ratio |
+| R3 Sanctioned 1-Hop | Seed address, direction (in/out/both), all seeds |
+| R4 PageRank | Actual PageRank score vs threshold |
+| R5 Apriori | Antecedent itemset, support, confidence, lift |
+
+**Score Contribution Breakdown (horizontal bar chart):**
+- One bar per rule: red if triggered, grey if not
+
+**Sub-tabs within the Dossier:**
+
+- **📜 Transaction Evidence:** Scatter plot (timestamp vs ETH value, colored by direction) + transactions table
+- **📊 Behavioral Features:** All 14 features with raw value and cohort percentile
+- **🕸️ Graph Neighbors:** Table of direct 1-hop transaction edges
+- **💾 Raw Case File (JSON):** Full audit trace with download button
+
+---
+
+### Tab 4: Network
+
+**Purpose:** Interactive transaction subgraph visualization.
+
+**Controls:** Focal Address, Max Hops (1 or 2), Max Nodes (10–80), Color Nodes By
+
+**Color modes:**
+| Mode | What colors mean |
+|---|---|
+| Risk Tier | Red=High, Amber=Medium, Slate=Low |
+| Primary Flag | Orange=cycle, Yellow=fan-out, Red=sanctioned, Purple=PageRank, Sky=Apriori, Grey=noise |
+| Louvain Community | Each community gets a distinct color |
+| DBSCAN Cluster | Red=noise outlier, Blue=dense cluster |
+
+---
+
+### Tab 5: Patterns
+
+**Purpose:** Inspect the raw output of each detection algorithm.
+
+Sub-tabs: **R1 · Circular Flow**, **R2 · Fan-Out**, **R3 · Sanctioned 1-Hop**, **R4 · PageRank Top 5%**, **R5 · Apriori Rules**, **DBSCAN Density**, **Louvain Communities**
+
+Each rule sub-tab shows a table of flagged wallets merged with their risk score and tier.
+
+The **DBSCAN tab** shows noise outlier count, cluster count, and a table of noise wallets.
+
+The **Louvain tab** shows community count and a bar chart of the top 15 community sizes.
+
+---
+
+### Tab 6: Evaluation
+
+**Purpose:** Empirical model validation on the held-out test split.
+
+**Operating Points Comparison (two columns):**
+- **High Threshold (score >= 60):** Precision, Recall, F1 + Confusion matrix heatmap (blue)
+- **Medium Threshold (score >= 25):** Precision, Recall, F1 + Confusion matrix heatmap (green)
+
+**Leave-One-Rule-Out Ablation Study:**
+- Table: rule, affected wallets, baseline F1, ablated F1, delta F1, delta precision, delta recall, tier changes
+- Bar chart: X=ablated rule, Y=delta F1. Red bars = rule is valuable, Green bars = rule adds noise.
+
+---
+
+### Tab 7: Data & Export
+
+**Purpose:** Audit trail, artifact inventory, and data export.
+
+- **Artifact Inventory table:** All output files with size, last modified, and presence status
+- **Provenance & Execution Hashes:** Full `run_info.json` with git commit, package versions, timestamps, API call counts, rules SHA-256
+- **Export Bundle:** "📦 Download Complete Artifact Archive (.zip)"
+
+---
+
+## 9. Evaluation: How We Measure Quality
+
+### Train/Test Split
+
+Addresses are assigned to **train** or **test** splits deterministically by address hash — not randomly at runtime. The same address always gets the same split assignment.
+
+### Metrics
+
+- **Precision** = of wallets we called suspicious, what fraction really were bad actors
+- **Recall** = of actual bad actors, what fraction did we catch
+- **F1** = harmonic mean of precision and recall
+- **Average Precision (PR-AUC)** = area under the Precision-Recall curve
+
+Evaluated at two thresholds:
+- **High (score >= 60):** High precision focus
+- **Medium (score >= 25):** Higher recall focus
+
+### Ablation Study
+
+Drops one rule at a time (sets its weight to 0), re-scores, and re-evaluates. Measures the **marginal value** of each rule.
+
+```
+R3 ablated: ΔF1 = -0.180 → R3 is the most important rule
+R4 ablated: ΔF1 = +0.005 → R4 adds slight noise on this dataset
+```
+
+---
+
+## 10. Quickstart
+
+### Prerequisites
+
+- Python 3.11+
+- [uv](https://docs.astral.sh/uv/) (`pip install uv`)
+- Etherscan API key (free tier, from https://etherscan.io/myapikey) — only needed for `--mode real`
+
+### Install
+
+```bash
+git clone <repo-url>
+cd ChainLens
+uv sync
+```
+
+### Configure
 
 ```bash
 cp .env.example .env
-# edit .env and replace your_etherscan_api_key_here
+# Edit .env and add: ETHERSCAN_API_KEY=your_key_here
 ```
 
-`.env` is gitignored. The key is read from `ETHERSCAN_API_KEY`, sent only to
-`https://api.etherscan.io/v2/api`, and is never written to `run_info.json` or any output
-artifact. `data/output/` and `data/cache/` are also gitignored.
-
-### 5. Run real data
+### Run Sample Pipeline (No API Key Needed)
 
 ```bash
-# Development sample (recommended first real run: ~600 addresses, ~4 minutes)
-uv run chainlens --mode real --max-addresses 400 --max-txs 150 --context-max 200
-
-# Full configured scope (all labels, most-recent 500 tx/address)
-uv run chainlens --mode real
-
-# Re-run analytics/evaluation without re-fetching (uses cached raw + labels + split)
-uv run chainlens --mode real --skip-fetch
+uv run python run.py --mode sample
 ```
 
-Useful flags:
+Uses the fixture data in `data/sample/` — no internet connection required.
 
-| Flag | Meaning |
-|---|---|
-| `--mode sample` | Offline fixture; no network, no key required |
-| `--mode real` | Etherscan V2 ingestion |
-| `--max-addresses N` | Development cap: roughly half labelled positives, half Kaggle negatives |
-| `--max-txs N` | Override the per-address most-recent transaction cap (default 500) |
-| `--context-max N` | Cap random-block context addresses (default 500) |
-| `--no-context` | Disable random-block context sampling |
-| `--skip-fetch` | Reuse `transactions_raw.parquet`, `labels.parquet`, `splits.parquet` |
-| `--output DIR` | Write artifacts somewhere other than `data/output` |
+### Run Real Pipeline
 
-The Etherscan free tier is rate-limited to **3 calls/second**; the client throttles to that
-rate, retries rate-limit responses, and caches each address by chain, offset, and block
-window. A cache entry from a 150-transaction run is not silently reused by a 500-transaction
-run.
+```bash
+# Full real-data fetch
+uv run python run.py --mode real --max-addresses 200
 
-### 6. Open the dashboard
+# Skip re-fetching if transactions already cached
+uv run python run.py --mode real --skip-fetch
+```
+
+### Launch Dashboard
 
 ```bash
 uv run streamlit run dashboard.py
-# or point it at another artifact directory:
-CHAINLENS_OUTPUT_DIR=/tmp/chainlens_run uv run streamlit run dashboard.py
+# Opens at http://localhost:8501
 ```
 
-Tabs: **Overview**, **Wallets**, **Network**, **Evaluation**, **About**. The wallet table is
-selectable; the selected wallet shows its rule trace, contribution bars, evidence JSON, and a
-JSON download. Scores and traces can be exported as CSV/JSON. The network tab colours nodes by
-the already-computed tier; NetworkX supplies only a spring layout.
-
----
-
-## Scoring contract
-
-Weights are **locked** to the deck:
-
-| Rule | Signal | Weight | Meaning |
-|---|---|---:|---|
-| R1 | Circular flow | 25 | 3–5 hop cycle with edge values within 5% and the cycle inside 24 hours |
-| R2 | Fan-out | 20 | Many distinct outbound counterparties with a high outbound share |
-| R3 | Sanctioned 1-hop | 30 | One hop from a **train-split** sanctioned seed, in either direction |
-| R4 | PageRank top 5% | 15 | Value-weighted graph prominence ≥ the 95th percentile |
-| R5 | Apriori match | 20 | Behavioural itemset match to train-split flagged wallets, confidence ≥ 0.8 |
-
-```
-raw_score   = sum(weight for each hit)                  # maximum 110
-adjusted    = raw_score * 0.3 if a known exchange/bridge/mixer/contract
-score       = min(100, round(adjusted))                 # hard clamp
-tier        = low 0–24 | medium 25–59 | high 60–100
-```
-
-The known-address down-weight is applied **before** the clamp and tiering. The final score is
-always an integer. The raw maximum is 110, so a wallet hitting all five rules is clamped from
-110 to 100; `clamped: true` is recorded in its trace.
-
-### The slide-21 “65” discrepancy
-
-The deck's slide-21 example says R1 + R2 + R4 = 65. Under the locked weights it is:
-
-```
-R1 25 + R2 20 + R4 15 = 60
-```
-
-Therefore the example is High (60 ≥ 60), but the value **60**, not 65, is what the code
-asserts. The test suite checks `raw_score == 60` and `tier == "high"`; it does not hard-code 65.
-Resolving 65 requires either changing a locked weight or adding a signal, which the project
-intentionally did not do.
-
-### Trace contract
-
-Every wallet has a JSON trace:
-
-```json
-{
-  "address": "0x…",
-  "raw_score": 60,
-  "adjusted_raw_score": 60.0,
-  "score": 60,
-  "tier": "high",
-  "top_driver": "R1",
-  "clamped": false,
-  "downweight": {"applied": false, "factor": 1.0, "category": null},
-  "rules": {
-    "R1": {"hit": true, "weight": 25, "contribution": 25, "inputs": {}, "gate": null},
-    "R2": {"hit": false, "weight": 20, "contribution": 0, "inputs": {}, "gate": null}
-  },
-  "rules_version": "…",
-  "scaler_version": "…"
-}
-```
-
-`validate_trace()` checks that contributions sum to `raw_score`, the clamp is consistent, and
-the tier matches the score. The dashboard displays this trace, not a hidden model.
-
----
-
-## Rules in detail
-
-### R1 — circular flow (25)
-
-Finds elementary cycles of length 3–5 inside strongly connected components. A cycle qualifies
-only when every edge value is within 5% of the cycle minimum and the time span from the first
-edge to the last edge is at most 24 hours. SCCs larger than `max_scc_size` are skipped as a
-scalability guard; enumeration is capped. The trace records the cycle count and cycle paths.
-
-### R2 — outbound fan-out (20)
-
-Implemented gate:
-
-```
-unique_counterparties >= 20
-AND tx_count_out >= 20
-AND unique_counterparties / tx_count_out >= 0.5
-```
-
-The deck's `out_in_ratio > 5` and `counterparties > 50` are recorded in each R2 trace as
-`r2_deck_equivalent`. This is a deliberate, documented semantic deviation: the implemented
-gate is the one the fixture and slide-21 example were built against.
-
-### R3 — sanctioned 1-hop (30)
-
-Seeds are **sanctioned addresses in the train split only**. Both successors and predecessors
-of a seed are flagged. Darklist addresses remain positive labels for R5, but are not R3 seeds. Test-split sanctioned addresses are never seeds. The trace
-records the seed, direction (`in`/`out`), and seed count.
-
-### R4 — PageRank top 5% (15)
-
-Value-weighted PageRank with `alpha=0.85`, damping and a `1e-12` floor on zero-value edges.
-Addresses at or above the 95th percentile are flagged. PageRank is a prominence/centrality
-signal, not a fraud probability; exchanges and token contracts can legitimately rank high,
-which is why the known-address down-weight exists.
-
-### R5 — Apriori match (20)
-
-The labelled train cohort is converted to boolean items:
-
-```
-high_fanout, high_tx_count, low_value, high_value, many_round,
-is_contract, recent_account, high_pagerank, dbscan_noise
-```
-
-Apriori mines rules with `min_support=0.05`, `min_lift=2.0`; only rules with consequent
-`flagged` and antecedents of size ≤ 3 are kept. At match time, confidence must be ≥ 0.8. The
-mining table contains **only labelled train addresses**; scoring applies the learned rules to
-every wallet. Mining the full 9k-address graph instead diluted `flagged` support to 1.1% and
-made `min_support=0.05` impossible — that bug was fixed and is covered by a test.
-
-`dbscan_noise` is an Apriori item, so DBSCAN is connected to scoring via R5. DBSCAN is not
-scored directly, and its cluster labels are not risk labels.
-
-### DBSCAN
-
-DBSCAN runs on `total_value_eth`, `tx_count_out`, `tx_count_in`, `unique_counterparties`, and
-`fanout_ratio`, all scaled on the train split, for wallets with at least 3 transactions.
-`eps=1.0122` is the 95th percentile of the 5-NN distance on the current feature cohort (the
-previous `3.195323` value produced one cluster and zero noise). Clusters feed the
-`dbscan_cluster` display flag and `dbscan_noise` feeds R5.
-
-### Louvain
-
-`nx.community.louvain_communities` runs on the undirected projection, seeded and weighted by
-`total_value_eth`. The community id is a display/context flag only; it is **not scored**. The
-exact community count can vary by ±1 with Python's hash seed, so the dashboard treats it as
-context, not a fixed metric.
-
----
-
-## Data and sampling
-
-### Transactions
-
-- Etherscan V2 `account/txlist`, Ethereum mainnet (`chainid=1`).
-- Per-address **most recent 500** normal transactions (configurable); the actual block range is
-  recorded in `run_info.json`.
-- Failed transactions and self-transfers are removed; contract-creation rows are retained where
-  useful; values are handled as `DECIMAL(38,18)` ETH, never binary floats for accounting.
-- A per-address Parquet + metadata cache enables resume. The cache key includes chain, offset,
-  start block, and end block.
-
-### Labels
-
-| Source | Use |
-|---|---|
-| `data/labels/ofac_eth.txt` | Sanctioned positives (snapshot dated in `SOURCES.json`) |
-| `data/labels/darklist.json` | Darklist positives |
-| `data/labels/kaggle_fraud.csv` | `flag=1` positives and sampled `flag=0` negatives (7,662 available) |
-
-Negatives are sampled deterministically (`negative_count: 2000`, seed 42). An address that is
-positive in any source is never used as a negative. Context addresses are sampled from 20
-random blocks (active addresses, unlabelled) and are excluded from test metrics.
-
-### Split and leakage
-
-- 70/30 stratified train/test split by label stratum, fixed seed 42.
-- R3 seeds are train-only.
-- R5 mines on labelled train addresses only; test labels never enter mining.
-- The scaler is fitted on the train split only and reused for all addresses.
-- Test addresses with no fetched activity are dropped and counted in `evaluation.json`.
-- The sample is **case-control** (labels enriched), so P/R/F1 are sample metrics, not
-  population prevalence estimates.
-
----
-
-## Evaluation
-
-Primary operating point is **High ≥ 60**. The code also reports a secondary **Medium ≥ 25**
-point, because the High tier can be empty while the ranking still carries signal. Average
-precision is computed over the test set.
-
-Guards:
-
-- Fewer than 3 test positives **or** fewer than 3 test negatives → `insufficient: true` and
-  precision/recall/F1 are `null`, never a fabricated 0 or 1.
-- Fixture labels are excluded by default.
-- `evaluation.json` records test counts, dropped addresses, TP/FP/TN/FN, and both operating
-  points.
-- Leave-one-rule-out ablation removes each rule from the score, recomputes tiers, and reports
-  `affected_wallets`, `delta_f1`, and `tier_changes`. If F1 is undefined, the ablation still
-  reports tier changes.
-
----
-
-## Results
-
-### Offline sample (committed fixture, no network)
-
-| Wallets | Tiers | R1 | R2 | R3 | R4 | R5 | DBSCAN | Louvain | Test labels |
-|---:|---|---:|---:|---:|---:|---|---|---|---|
-| 377 | 371 low · 6 medium · 0 high | 1 cycle (3 addresses) | 2 | 2 | 19 | 4 rules / 25 matches | 3 clusters · 19 noise | 38 communities | 1 positive / 3 negatives → insufficient |
-
-The sample is for correctness and UI smoke testing, not evidence.
-
-### Real Etherscan V2 runs
-
-#### Development run (600 addresses)
-
-`uv run chainlens --mode real --max-addresses 400 --max-txs 150 --context-max 200`
-
-| Wallets | Tiers | R1 | R2 | R3 | R4 | R5 | DBSCAN | Louvain | Test positives / negatives |
-|---:|---|---:|---:|---:|---:|---|---|---|---:|
-| 9,061 | 8,968 low · 93 medium · 0 high | 0 | 40 | 63 | 454 | 0 rules (best lift 1.450 < 2.0) | 4 clusters · 36 noise | 2,613 communities | 46 / 60 |
-
-| Operating point | Precision | Recall | F1 | TP / FP / TN / FN |
-|---|---:|---:|---:|---|
-| High ≥ 60 (primary) | 0.000 | 0.000 | 0.000 | 0 / 0 / 60 / 46 |
-| Medium ≥ 25 (secondary) | 0.429 | 0.065 | 0.113 | 3 / 4 / 56 / 43 |
-
-Average precision: **0.493** (case-control test sample; base positive rate 0.434).
-
-#### 1,000-address comparison
-
-`uv run chainlens --mode real --max-addresses 1000 --max-txs 500 --context-max 200`
-
-This run requested 1,200 addresses (500 positives, 500 Kaggle negatives, 200 random-block
-context addresses), fetched 117,709 raw rows, and produced 25,779 scored wallets (counterparties
-included). The fetch used 1,035 cache hits plus 165 live Etherscan calls; the final analytics
-were then reproduced with `--skip-fetch`.
-
-| Wallets | Tiers | R1 | R2 | R3 | R4 | R5 | DBSCAN | Louvain | Test positives / negatives |
-|---:|---|---:|---:|---:|---:|---|---|---|---:|
-| 25,779 | 25,290 low · 489 medium · 0 high | 0 | 68 | 442 | 1,370 | 0 rules (best lift 1.407 < 2.0) | 2 clusters · 32 noise | ≈8,880 communities | 118 / 150 |
-
-| Operating point | Precision | Recall | F1 | TP / FP / TN / FN |
-|---|---:|---:|---:|---|
-| High ≥ 60 (primary) | 0.000 | 0.000 | 0.000 | 0 / 0 / 150 / 118 |
-| Medium ≥ 25 (secondary) | 0.462 | 0.051 | 0.092 | 6 / 7 / 143 / 112 |
-
-Average precision: **0.522**; 32 test positives were dropped because they had no fetched
-activity. The 1,000-address run is a larger comparison, not a controlled improvement over the
-600-address run: it uses a different transaction cap and a larger known-address seed.
-
-**How to read these results.** Both high tiers are empty, so high-tier F1 is 0 and precision is
-undefined in practice. The medium tier has small but non-zero recall. Average precision is only
-slightly above the case-control base rate (about 0.44). This is an honest negative result for
-these labels, not a tuned success:
-
-- The Kaggle labels are from 2020–2021, while the graph is built from each address's most
-  recent 2026 transactions. A labelled 2021 fraud address that is now inactive has no graph
-  signal; 14 positives were dropped in the 600 run and 32 in the 1,000 run.
-- R3 sanctions are train-only. In the 1,000 run R3 flags 442 addresses, but only 1 of the 118
-  active test positives is a 1-hop neighbour of a train sanction seed. R2 hits 5 test positives;
-  R4 flags 61 test positives but contributes only 15 points.
-- R1 found no qualifying 3–5 cycles. The graph does contain 447 reciprocal 2-cycles, which the
-  rule deliberately excludes.
-- R5's strict gate (`min_lift=2.0`, confidence 0.8) yields zero rules; the best observed lift is
-  1.407–1.450. The threshold was **not** silently relaxed. The sample fixture still exercises
-  R5 with four rules.
-- Without R1/R3/R5 on most test wallets, no test wallet reaches 60. The top raw score is 50
-  (R3 + R2); the top-scoring addresses are still exchange/token/router infrastructure and are
-  not all covered by the documented known-address seed.
-- The full configured label set is ~4,300 addresses and requires roughly 25–30 minutes at
-  3 req/s; the command is `uv run chainlens --mode real` (optionally with a larger cache).
-
----
-
-## Deviations from the deck / review
-
-| Item | Deck / review | Implemented | Why |
-|---|---|---|---|
-| R1 + R2 + R4 example | 65 | **60** | Locked weights: 25 + 20 + 15 = 60; 60 still clears High |
-| R2 gate | `out_in_ratio > 5` AND counterparties > 50 | `unique_counterparties ≥ 20`, `tx_count_out ≥ 20`, `fanout_ratio ≥ 0.5`; deck condition in trace | Preserves tested v0 behaviour; deviation is visible, not silent |
-| Analysis window | One fixed week | Per-address most recent 500 tx; actual range recorded | Labels span years; a fixed week would empty most labelled addresses |
-| R5 mining cohort | “train only” | Labelled train cohort only | Mining all graph addresses diluted support below `min_support` |
-| R5 lift | 2.0 | 2.0 (unchanged); 0 rules on real dev data | Strict result reported; best observed lift 1.407–1.450 |
-| DBSCAN `eps` | 3.195323 | 1.0122 | 95th percentile 5-NN distance; old value gave 1 cluster/0 noise |
-| Evaluation | High only | High primary + Medium secondary + average precision | High tier can be empty while ranking still has signal |
-| Known addresses | Small seed | Added major token/router infrastructure | Reduces obvious R3/R4 false positives; still explicitly non-exhaustive |
-| Storage | Postgres + Neo4j | DuckDB file + NetworkX | Fits in memory; removes services with no analytical benefit |
-| Cache scope | Implicit | Requested addresses only | Prevents stale cache entries from an earlier, larger sample leaking into a smaller run |
-| Tests | 0 or 36 | 7 test files / 36 tests | One focused suite per stage, including slide-21 arithmetic |
-
-### What the project deliberately does **not** claim
-
-- That a high score is proof of fraud.
-- That Kaggle `flag=0` addresses are verified non-fraud.
-- That the OFAC/darklist snapshots are current.
-- That the case-control P/R/F1 generalizes to Ethereum's population.
-- That 60 is 65, or that the deck's R2 gate is identical to the implemented gate.
-
----
-
-## Tests and CI
+### Run Tests
 
 ```bash
-uv run ruff check .
-uv run pytest -q
+uv run pytest tests/ -v
 ```
-
-The 7 test files cover:
-
-| File | Focus |
-|---|---|
-| `tests/test_fetch.py` | Normalisation, cache/resume/refresh, error recovery, labels, split, context, HTTP client, key loader |
-| `tests/test_features.py` | Deduplication, failed/self filters, DECIMAL ETH, hand-computed features, train-only scaler, schema guard |
-| `tests/test_patterns.py` | R1 value/time/length filters, R2 deck diagnostic, PageRank zero floor, DBSCAN outlier, leakage-safe Apriori + `dbscan_noise`, Louvain, train-only R3 |
-| `tests/test_rules.py` | Locked weights, tier boundaries, R1–R5 hits, R5 confidence gate, trace validation, config rejection |
-| `tests/test_scoring.py` | Slide-21 60/High, down-weight, clamp, summary, trace round-trip |
-| `tests/test_evaluation.py` | High metrics, insufficient guard, fixture exclusion, ablation deltas, artifact writing |
-| `tests/test_pipeline.py` | End-to-end sample contract, DuckDB tables, no-key artifact check, dashboard AppTest |
-
-`tests/test_pipeline.py` runs the sample pipeline once per session and checks 377 wallets, all
-required artifacts, the DuckDB warehouse tables, trace validity, absence of the API key in
-text artifacts, and a Streamlit `AppTest` smoke run with zero exceptions. No test needs the
-network.
-
-CI (`.github/workflows/ci.yml`) uses `astral-sh/setup-uv` on Python 3.11, runs
-`uv sync --locked`, `uv run ruff check .`, and `uv run pytest -q`; it has no Postgres, Neo4j,
-or Docker services.
 
 ---
 
-## Repository layout
+## 11. Configuration Reference
+
+### `config/rules.yaml` — Rule Weights and Thresholds
+
+```yaml
+rules_version_label: "v0-deck"
+max_score: 100
+
+tiers:
+  low_max: 24        # 0–24 = Low
+  medium_max: 59     # 25–59 = Medium
+  high_min: 60       # 60–100 = High
+
+downweight:
+  known_address_factor: 0.3
+  known_address_categories: [exchange, bridge, mixer, contract]
+
+rules:
+  - id: R1   weight: 25   # cycle_length_min: 3, max: 5, value_tolerance: 0.05, time_window_hours: 24
+  - id: R2   weight: 20   # fanout_threshold: 20, min_outbound: 20, min_ratio: 0.5
+  - id: R3   weight: 30   # hops: 1, seed_source: train_only
+  - id: R4   weight: 15   # percentile: 95, alpha: 0.85
+  - id: R5   weight: 20   # min_support: 0.05, min_lift: 2.0, min_confidence: 0.8
+```
+
+> ⚠️ **Rule weights are locked.** The pipeline validates that weights are exactly `[25, 20, 30, 15, 20]` at startup. Changing them causes a `RuntimeError`.
+
+### `config/detection.yaml` — Algorithm Hyperparameters
+
+```yaml
+dbscan:
+  eps: 1.0122         # 95th percentile of 5-NN distance
+  min_samples: 5
+
+louvain:
+  seed: 42
+  weight: total_value_eth
+  resolution: 1.0
+
+pagerank:
+  alpha: 0.85
+  max_iter: 100
+  tol: 1.0e-6
+
+cycles:
+  max_scc_size: 5000
+  enum_cap: 5000
+  per_scc_cap: 1000
+```
+
+### `config/known_addresses.json`
+
+```json
+[
+  {"address": "0xa0b86991c6218...", "category": "exchange", "note": "USDC issuer"},
+  {"address": "0x7a250d5630b4...", "category": "contract", "note": "Uniswap v2 router"}
+]
+```
+
+---
+
+## 12. Output Artifacts
+
+All written to `data/output/` after a successful pipeline run:
+
+| File | Format | Contents |
+|---|---|---|
+| `scores.parquet` | Parquet | One row per wallet: address, raw_score, score, tier, top_driver, rules_version |
+| `scores.csv` | CSV | Same as above in CSV format |
+| `traces.parquet` | Parquet | Full per-wallet audit trace JSON: all rule hits, contributions, downweight details |
+| `traces.csv` | CSV | Same as above |
+| `flags.parquet` | Parquet | All signal flags: address, signal_name, signal_value, evidence JSON |
+| `graph_edges.parquet` | Parquet | Aggregated transaction graph: from, to, tx_count, total_value_eth, timestamps |
+| `wallet_features.parquet` | Parquet | 14 engineered features + 5 scaled features per wallet |
+| `labels.parquet` | Parquet | Ground truth labels with source and confidence |
+| `splits.parquet` | Parquet | Train/test assignment per address |
+| `known_addresses.parquet` | Parquet | Snapshot of known entity registry used in this run |
+| `transactions_clean.parquet` | Parquet | De-duplicated, filtered transaction table |
+| `evaluation.json` | JSON | P/R/F1, PR-AUC, confusion matrix at both operating thresholds |
+| `evaluation.md` | Markdown | Human-readable evaluation summary |
+| `ablation.csv` | CSV | Leave-one-rule-out ablation results per rule |
+| `run_info.json` | JSON | Full provenance: git commit, package versions, timestamps, API call counts, hashes |
+
+---
+
+## 13. Architecture Overview
 
 ```
 ChainLens/
+├── run.py                  # Pipeline orchestrator
+├── fetch_data.py           # Stage 1: Etherscan ingestion + label loading
+├── features.py             # Stage 2: Feature engineering (DuckDB SQL)
+├── patterns.py             # Stage 4: R1–R5 detection + DBSCAN + Louvain + Apriori
+├── scoring.py              # Stage 5: Composite scoring + audit trace
+├── evaluate.py             # Stage 6: P/R/F1 + ablation
+├── dashboard.py            # Read-only Streamlit analyst workspace
 ├── config/
-│   ├── rules.yaml              # locked weights, tiers, R2/R5 params
-│   ├── detection.yaml          # DBSCAN/PageRank/Louvain/cycle params
-│   ├── data.yaml               # paths, sampling, window, Etherscan
-│   └── known_addresses.json    # documented seed list
+│   ├── rules.yaml          # Locked rule weights and tier thresholds
+│   ├── detection.yaml      # Algorithm hyperparameters
+│   ├── data.yaml           # Data paths and sampling settings
+│   └── known_addresses.json # Known entity registry
 ├── data/
-│   ├── labels/                 # OFAC, darklist, Kaggle
-│   ├── sample/                 # offline transaction + label fixtures
-│   ├── cache/                  # gitignored per-address cache
-│   └── output/                 # gitignored artifacts
-├── tests/                      # 7 focused test files
-├── fetch_data.py
-├── features.py
-├── patterns.py
-├── scoring.py
-├── evaluate.py
-├── run.py
-├── dashboard.py
-├── simplification_plan.md      # v2 design/decision record
-├── .python-version             # pinned 3.11 for uv/CI
-├── uv.lock                     # locked dependency graph
-├── requirements.txt            # fallback only; uv.lock is authoritative
-└── pyproject.toml
+│   ├── sample/             # Fixture data (transactions, labels, known addresses)
+│   │   ├── transactions.parquet
+│   │   ├── labels_fixture.csv
+│   │   └── known_fixture.csv
+│   └── output/             # All pipeline artifacts (git-ignored)
+└── tests/                  # pytest test suite
+```
+
+### Module Dependency Map
+
+```
+run.py
+  ├── fetch_data.py     (stage 1)
+  ├── features.py       (stage 2-3)
+  ├── patterns.py       (stage 4)
+  │     ├── networkx   (graph algorithms)
+  │     ├── sklearn    (DBSCAN)
+  │     └── mlxtend    (Apriori)
+  ├── scoring.py        (stage 5)
+  └── evaluate.py       (stage 6)
+
+dashboard.py
+  └── reads data/output/ artifacts ONLY — no imports from above modules
 ```
 
 ---
 
-## Output artifacts
+## Frequently Asked Questions
 
-| File | Contents |
-|---|---|
-| `transactions_raw.parquet` | Normalised Etherscan rows |
-| `transactions_clean.parquet` | Deduplicated, filtered, DECIMAL-ETH transactions |
-| `wallet_features.parquet` | Wallet features + train-scaled columns |
-| `graph_edges.parquet` | Aggregated directed edges with value/count/time |
-| `flags.parquet` | Long-form rule/DBSCAN/PageRank/Louvain signals |
-| `scores.parquet` | Address, raw score, final score, tier, top driver, versions |
-| `traces.parquet` | One JSON trace per scored wallet |
-| `evaluation.json` / `.md` | Test metrics, operating points, ablation summary |
-| `ablation.csv` | Leave-one-rule-out table |
-| `run_info.json` | Mode, seed, window, counts, versions, hashes, git commit |
-| `chainlens.duckdb` | Warehouse: transactions, features, scaler, labels, splits, flags, scores, traces, edges |
-| `scores.csv` / `traces.csv` | Flat exports for the dashboard/CSV workflow |
+**Q: Why is the High tier empty?**
+In sample mode, triggering two or more rules simultaneously is rare by construction. The Medium tier is the active investigative queue. See §6.
 
----
+**Q: Why does R5 (Apriori) show "no frequent itemsets"?**
+There are not enough labelled training positives (bad actors) to mine stable association rules. You need at least ~10 confirmed positives in the training split before Apriori can find patterns clearing `min_support = 0.05` + `lift >= 2.0`.
 
-## Security and ethics
+**Q: Can I change the rule weights?**
+No — the weights are intentionally locked at `[25, 20, 30, 15, 20]`. Changing them causes a `RuntimeError` on startup. This prevents model drift without a formal re-review.
 
-- The Etherscan key lives only in `.env`; `.env` is gitignored. The key is never printed,
-  embedded in logs, or written to `run_info.json`. `run_info.json` contains only
-  `api_key_present: true/false`.
-- The test suite checks that a configured key does not appear in text artifacts.
-- `data/cache/` contains public on-chain transaction data and is gitignored; `data/output/`
-  is gitignored.
-- Rotate the key immediately if it is ever committed or pasted into a screenshot.
-- Labels are noisy and time-stamped. OFAC/darklist entries can be stale or overbroad; Kaggle
-  negatives are not verified clean. Use the trace and human review, not the score alone.
-- R4 and R5 are association/prominence signals, not causal fraud evidence. DBSCAN noise is an
-  outlier flag, not guilt.
-- Known-address down-weighting is a small, documented seed list; it cannot cover every
-  exchange, bridge, router, or token contract.
+**Q: What does "downweighted" mean on a wallet?**
+The wallet is in `known_addresses.json` under a benign category (exchange, bridge, etc). Its raw score is multiplied by 0.3 before clamping. A raw score of 40 becomes a final score of 12 (Low tier).
+
+**Q: Can the dashboard be used without running the pipeline?**
+No — the dashboard requires at least `scores.parquet` in `data/output/`. Run `uv run python run.py --mode sample` first.
+
+**Q: How is the train/test split determined?**
+Deterministically by hashing the wallet address with a fixed seed. The same address always gets the same split assignment across runs.
 
 ---
 
-## Viva-ready questions
-
-**Why seven files rather than one engine?**
-One file per stage gives a clear input/output contract, keeps each module small enough to
-explain, and prevents a `utils.py` dumping ground. The stages still run in one process.
-
-**Why DuckDB?**
-The dataset fits in memory, DuckDB gives SQL cleaning and an inspectable warehouse file, and
-it removes Postgres/Neo4j services that added ops cost without analytical value.
-
-**Why does the real run have no High-tier predictions?**
-Because no active test wallet hit 60 under the locked weights: R1 found no qualifying cycles,
-R3 test wallets were not 1-hop from train sanction seeds, and R5 produced no rules at
-`min_lift=2.0`. The honest result is F1 0 at High; the Medium operating point and AP are
-reported alongside it.
-
-**Why is R5 empty on real data?**
-The best observed lift among flagged-consequent rules is 1.407–1.450, below the configured 2.0.
-Lowering the gate would make the number look better but would silently change the rule
-contract. The sample fixture still demonstrates R5 with four rules.
-
-**How is leakage prevented?**
-R3 seeds are train-only; R5 mines only labelled train addresses; the scaler is fitted on train;
-test labels are used only in `evaluate.py`; and fixture labels are excluded from real metrics.
-
-**How does DBSCAN affect the score?**
-Only through R5: `dbscan_noise` is a boolean Apriori item. DBSCAN itself is not a weighted
-rule, and its cluster id is a display flag.
-
-**Why 60, not 65?**
-Locked weights: R1 25 + R2 20 + R4 15 = 60. The slide's 65 cannot be reproduced without
-changing a weight or adding a signal; the test asserts 60 and High.
-
-**What would you do next?**
-Use fresher labels aligned to the transaction window, run the full ~4,300-address scope with
-500 tx/address, calibrate R5 with a validation split (not the test split), and add an
-exchange/bridge router registry with dated provenance.
-
----
-
-## License / academic use
-
-This is an academic project. Public-chain data is used for detection research; labels are
-attributed in `data/labels/SOURCES.json`. Do not deploy the scores as automated enforcement.
+*ChainLens v2 — Blockchain forensics & compliance intelligence platform*

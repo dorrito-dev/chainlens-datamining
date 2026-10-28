@@ -85,9 +85,21 @@ def test_dashboard_starts_without_exceptions(sample_output: Path, monkeypatch) -
     app = AppTest.from_file(str(ROOT / "dashboard.py"), default_timeout=90)
     app.run()
     assert len(app.exception) == 0, [e.value for e in app.exception]
-    labels = [tab.label for tab in app.tabs]
-    assert "📊 Overview" in labels
-    assert "🔎 Wallets" in labels
-    assert "🕸️ Network" in labels
-    assert "📐 Evaluation" in labels
     assert len(app.metric) >= 5
+
+    radio = app.radio(key="nav_radio")
+    assert set(radio.options) >= {
+        "Overview", "Triage", "Wallet dossier", "Network",
+        "Patterns", "Evaluation", "Data & export",
+    }
+
+    # Verify each view renders cleanly without exceptions
+    for view in ["Triage", "Wallet dossier", "Network", "Patterns", "Evaluation", "Data & export"]:
+        app.radio(key="nav_radio").set_value(view).run()
+        assert len(app.exception) == 0, f"Error in view {view}: {[e.value for e in app.exception]}"
+
+
+def test_dashboard_read_only_contract() -> None:
+    content = (ROOT / "dashboard.py").read_text(encoding="utf-8")
+    for forbidden in ["import scoring", "import patterns", "import evaluate", "from scoring import", "from patterns import", "from evaluate import"]:
+        assert forbidden not in content, f"Dashboard violates read-only contract by importing: {forbidden}"
