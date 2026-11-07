@@ -78,7 +78,7 @@ def test_r1_r5_hits_and_r5_confidence_gate() -> None:
     features = pd.DataFrame({"address": [a, b, c, d]})
     flags = {}
     flags.update(flags_for(a, cycle=3, fanout=True, sanctioned=True, pagerank=True, apriori=0.9))
-    flags.update(flags_for(b, cycle=2))  # length 2 is outside R1's 3-5
+    flags.update(flags_for(b, cycle=6))  # length 6 is outside R1's 2-5
     flags.update(flags_for(c, apriori=0.79))  # below R5 confidence gate
     flags.update(flags_for(d, cycle=5, fanout=True))
 
@@ -110,6 +110,42 @@ def test_r1_r5_hits_and_r5_confidence_gate() -> None:
     trace_c = traces.set_index("address").loc[c, "trace"]
     assert trace_c["rules"]["R5"]["hit"] is False
     assert "confidence" in trace_c["rules"]["R5"]["gate"]
+
+    for trace in traces["trace"]:
+        validate_trace(trace)
+
+
+def test_continuous_rule_strengths_scale_contributions() -> None:
+    cfg = load_rules_config()
+    a, b = addr(10), addr(11)
+    features = pd.DataFrame({"address": [a, b]})
+    flags = {
+        (a, "sanctioned_1hop"): {
+            "signal_value": 1, "strength": 0.25,
+            "evidence": {"exposure_fraction": 0.25, "seed": addr(999)},
+        },
+        (a, "pagerank_top5"): {
+            "signal_value": 1, "strength": 0.5,
+            "evidence": {"pagerank": 0.02, "threshold": 0.01, "top5": True},
+        },
+        (b, "pagerank_top5"): {
+            "signal_value": 0, "strength": 0.01,
+            "evidence": {"pagerank": 0.001, "threshold": 0.01, "top5": False},
+        },
+    }
+    scores, traces = evaluate_scores(features, flags, pd.DataFrame(), cfg)
+    by_addr = scores.set_index("address")
+    assert by_addr.loc[a, "raw_score"] == pytest.approx(7.5 + 7.5)
+    assert by_addr.loc[a, "top_driver"] == "R3"  # tie resolved by RULE_IDS order
+    assert by_addr.loc[b, "raw_score"] == 0  # below R4 min_strength
+
+    trace_a = traces.set_index("address").loc[a, "trace"]
+    assert trace_a["rules"]["R3"]["strength"] == pytest.approx(0.25)
+    assert trace_a["rules"]["R3"]["contribution"] == pytest.approx(7.5)
+    assert trace_a["rules"]["R4"]["contribution"] == pytest.approx(7.5)
+    trace_b = traces.set_index("address").loc[b, "trace"]
+    assert trace_b["rules"]["R4"]["hit"] is False
+    assert "strength" in trace_b["rules"]["R4"]["gate"]
 
     for trace in traces["trace"]:
         validate_trace(trace)

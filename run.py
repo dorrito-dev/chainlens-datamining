@@ -267,6 +267,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         detection_cfg = patterns_mod.load_detection_config(PROJECT_ROOT / "config" / "detection.yaml")
         detection = patterns_mod.run_detection(
             con, features_scaled, labels, splits, rules_cfg, detection_cfg,
+            known_addresses=known,
         )
         flags = detection["flags"]
         print(
@@ -395,6 +396,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "dbscan_eps": detection["dbscan_summary"].get("eps"),
                 "dbscan_min_samples": detection["dbscan_summary"].get("min_samples"),
                 "louvain_communities": detection["louvain_communities"],
+                **detection.get("pattern_stats", {}),
             },
         }
         _write_json(run_info, output_dir / "run_info.json")

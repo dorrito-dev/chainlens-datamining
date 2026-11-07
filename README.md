@@ -66,17 +66,17 @@ Etherscan API / Sample Fixture
                ▼
 ┌─────────────────────────────┐
 │  Stage 4 · patterns.py      │  Pattern Detection
-│  NetworkX DiGraph           │  R1: cycle detection
-│  DBSCAN clustering          │  R2: fan-out
-│  Apriori association rules  │  R3: sanctioned 1-hop
-│  Louvain communities        │  R4: PageRank top 5%
+│  NetworkX DiGraph           │  R1: cycles (length 2–5)
+│  DBSCAN clustering          │  R2: scatter→gather motif
+│  Apriori association rules  │  R3: frozen sanctions + exposure
+│  Louvain communities        │  R4: continuous PageRank
 │  PageRank                   │  R5: Apriori match
 └──────────────┬──────────────┘
                │ flags dict
                ▼
 ┌─────────────────────────────┐
 │  Stage 5 · scoring.py       │  Composite Scoring
-│  R1–R5 rule weights         │  raw_score = Σ (hit × weight)
+│  R1–R5 rule weights         │  raw_score = Σ (strength × weight)
 │  Known-address downweight   │  score clamped 0–100
 │  Audit trace JSON           │  → scores.parquet, traces.parquet
 └──────────────┬──────────────┘
@@ -116,13 +116,18 @@ Every wallet receives a **composite risk score from 0 to 100** based on which ru
 | Rule | Signal | Weight | What it detects |
 |---|---|---|---|
 | R1 | `cycle_member` | **25 pts** | Circular fund flows (money laundering typology) |
-| R2 | `fanout` | **20 pts** | Rapid outbound dispersion (structuring / smurfing) |
-| R3 | `sanctioned_1hop` | **30 pts** | Direct link to OFAC/sanctioned address |
-| R4 | `pagerank_top5` | **15 pts** | High network centrality (financial hub) |
+| R2 | `fanout` | **20 pts** | Temporal scatter→gather smurf motif (structuring) |
+| R3 | `sanctioned_1hop` | **30 pts** | Direct link to frozen OFAC/sanctioned address, scaled by exposure |
+| R4 | `pagerank_top5` | **15 pts** | Continuous upper-tail network centrality |
 | R5 | `apriori_match` | **20 pts** | Behavioural profile matching known bad actors |
-| **Max raw** | | **110 pts** | (all five triggered simultaneously) |
+| **Max raw** | | **110 pts** | (all five at full strength) |
 
 The maximum raw score is 110 but the final score is **hard-clamped to 100**.
+
+R1, R2 and R5 are binary. R3 and R4 carry an evidence-derived `strength` in
+`[0, 1]` and contribute `weight × strength`, so a small sanctioned exposure or
+a mid-tail PageRank rank earns proportionally fewer points. `raw_score` can
+therefore be fractional; the final score is still rounded after downweighting.
 
 ### Tier Thresholds
 
@@ -137,16 +142,32 @@ The maximum raw score is 110 but the final score is **hard-clamped to 100**.
 
 If a wallet is in `config/known_addresses.json` under a category like `exchange`, `bridge`, `mixer`, or `contract`, its raw score is multiplied by **0.3** before clamping. This prevents Uniswap, Binance, and similar high-volume addresses from being falsely flagged.
 
-### Scoring Example
+### Scoring Examples
 
 ```
-Wallet 0xabc...def interacts with a sanctioned address (R3 hit = 30 pts)
-and has high fan-out (R2 hit = 20 pts)
+Example A (Full-strength binary hits):
+Wallet 0xabc...def interacts directly with a sanctioned address (R3 hit, full exposure: strength = 1.0 → 30 pts)
+and triggers the scatter→gather smurf motif (R2 hit: strength = 1.0 → 20 pts)
 
-  raw_score = 30 + 20 = 50
+  raw_score = 30.0 + 20.0 = 50.0
   known_category = None → factor = 1.0
   final_score = min(50, 100) = 50  →  MEDIUM tier
   top_driver = R3
+
+Example B (Continuous evidence strength & benign downweighting):
+Wallet 0x123...456 has partial sanctioned exposure (R3: 25% inflow volume, strength = 0.25 → 7.5 pts)
+and high PageRank centrality (R4: 94th percentile, strength = 0.40 → 6.0 pts)
+
+  raw_score = 7.5 + 6.0 = 13.5
+  known_category = None → factor = 1.0
+  final_score = round(13.5) = 14  →  LOW tier
+
+Example C (Known-entity downweighting):
+Known exchange hot wallet in known_addresses.json triggers R2 fan-out (20 pts) and R4 PageRank (15 pts):
+  raw_score = 35.0
+  known_category = "exchange" → factor = 0.3
+  adjusted_raw_score = 35.0 × 0.3 = 10.5
+  final_score = round(10.5) = 11  →  LOW tier (suppressed false positive)
 ```
 
 ---
@@ -155,42 +176,57 @@ and has high fan-out (R2 hit = 20 pts)
 
 ### R1 · Circular Flow Detection (Weight: 25)
 
-**What it looks for:** Directed transaction cycles of length 3–5 where money travels in a loop back to its origin.
+**What it looks for:** Directed transaction cycles of length **2–5** where money travels in a loop back to its origin.
 
-**Real-world pattern:** In layering schemes, funds move A → B → C → A to obscure the origin. ChainLens detects this using **Strongly Connected Components (SCC)** in the transaction graph, then enumerates simple cycles within each SCC.
+**Real-world pattern:** In layering schemes, funds move A → B → C → A to obscure the origin. ChainLens detects this using **Strongly Connected Components (SCC)** in the transaction graph, then enumerates simple cycles within each SCC. Length-2 cycles capture the two-account self-trade pairs documented by Victor & Weintraud.
 
 **The constraints that make it precise:**
-- Cycle length must be between 3 and 5 hops (longer cycles are too common)
-- All edge values within the cycle must be within **5% of each other** (uniform wash)
+- Cycle length must be between **2 and 5 hops** (longer cycles are too common)
+- All edge values within the cycle must be within **±2% of each other** (ETH transfers differ only by gas-fee noise)
 - The entire cycle must complete within **24 hours**
 - SCCs larger than 5,000 nodes are skipped for performance
 
 ---
 
-### R2 · Outbound Fan-Out (Weight: 20)
+### R2 · Outbound Fan-Out / Smurf Motif (Weight: 20)
 
-**What it looks for:** A wallet that sends to many distinct counterparties — the classic "smurfing" or "structuring" pattern.
+**What it looks for:** The **scatter→gather** motif from Starnini et al.: a wallet disperses funds to many intermediaries, and those intermediaries forward funds onwards **after** the scatter, within a 72-hour window.
 
-**The three-gate threshold (all must pass):**
+**The scatter gate (all must pass):**
 1. `unique_counterparties >= 20`
 2. `tx_count_out >= 20`
 3. `fanout_ratio >= 0.5`
+
+**The gather gate (must also pass):**
+- At least 2 intermediaries (or 10% of scattering counterparties) forward funds after the scatter edge
+- At least 1 distinct collector receives those forwarded funds
+- Gather edges occur after their scatter edge and within 72 hours
+
+A wallet that only scatters is a *candidate*, not a confirmed smurf; it receives no R2 points.
 
 ---
 
 ### R3 · Sanctioned Entity 1-Hop (Weight: 30)
 
-**What it looks for:** Any wallet that directly sent to, or directly received from, a **known sanctioned address** in the training split.
+**What it looks for:** Any wallet that directly sent to, or directly received from, a **frozen OFAC-sanctioned address** (or a labelled sanctioned seed).
 
-**Only training seeds are used** to prevent test-set leakage.
+**Seeds are split-independent:** `config/sanctions.json` is a frozen OFAC snapshot, unioned with all labelled sanctioned addresses. Train/test membership is irrelevant to R3.
+
+**Evidence and severity:**
+- Transfers below **0.01 ETH** are ignored (dusting-attack defence)
+- `inflow_exposure_fraction` and `outflow_exposure_fraction` measure how much of the wallet's volume touched a sanctioned seed
+- R3 strength is `max(exposure, 0.10)` so a confirmed direct link always retains at least 10% of the 30-point weight
+- Evidence lists every seed, direction, and ETH amount
 
 ---
 
 ### R4 · PageRank Network Prominence (Weight: 15)
 
-**What it looks for:** Wallets in the **top 5% of value-weighted PageRank** across the entire transaction graph.
+**What it looks for:** Wallets in the **continuous upper tail of value-weighted PageRank** across the entire transaction graph.
 
-Parameters: `alpha = 0.85`, weighted by `total_value_eth`, 95th percentile threshold.
+Parameters: `alpha = 0.85`, weighted by `total_value_eth`. Wallets at the **90th percentile or above** earn a continuous strength `(percentile − 90) / 10`; contributions below 0.05 strength are discarded. The 95th percentile is still recorded as a diagnostic `top5` marker.
+
+**Known-address exclusion:** Addresses in `known_addresses.json` under `exchange`, `bridge`, `mixer`, or `contract` are never R4-flagged, because high PageRank often means a legitimate high-volume hub.
 
 ---
 
@@ -219,7 +255,7 @@ Apriori is a classic algorithm for finding **frequent patterns in boolean data**
    - `many_round` — >= 50% of transfers are whole-ETH amounts
    - `is_contract` — address created a contract
    - `recent_account` — first seen within 7 days of the window end
-   - `high_pagerank` — in the PageRank top 5%
+   - `high_pagerank` — in the PageRank diagnostic top 5% (95th percentile)
    - `dbscan_noise` — flagged as an outlier by DBSCAN
 
 2. **Mine frequent itemsets** on the **training split only** with `min_support = 0.05`
@@ -273,8 +309,10 @@ PageRank assigns each node an importance score based on how many important nodes
 
 - Standard PageRank with `alpha = 0.85`
 - Edge weight = `total_value_eth`
-- Threshold = 95th percentile of all scores
-- Wallets above threshold get `pagerank_top5` flag and 15 points
+- Continuous tail begins at the **90th percentile**; strength = `(percentile − 90) / 10`
+- Contribution = `15 × strength` (minimum strength 0.05)
+- The 95th percentile is retained as a diagnostic `top5` marker for reporting
+- Known exchange/bridge/mixer/contract addresses are excluded before flagging
 
 ---
 
@@ -290,10 +328,10 @@ When running in `--mode sample`, ChainLens uses a **fixture dataset** with synth
 
 | Rule | Why Zero Hits Happens |
 |---|---|
-| **R1 Circular Flow** | The transaction subgraph needs directed cycles of length 3–5 with matching values within 24h. In sparse or synthetic data, this rarely occurs naturally. |
-| **R2 Fan-Out** | A wallet needs >=20 outbound transactions to >=20 unique addresses. Small-sample wallets almost never reach this threshold. |
-| **R3 Sanctioned 1-Hop** | Requires sanctioned addresses in the **training split** to have transaction edges to other wallets in the graph. If no sanctioned seed appears as a graph node, zero flags are produced. |
-| **R4 PageRank Top 5%** | Always produces exactly 5% of graph nodes as hits by design. On extremely small graphs, the percentile arithmetic produces edge effects. |
+| **R1 Circular Flow** | The transaction subgraph needs directed cycles of length 2–5 with values within ±2% and 24h. In sparse or synthetic data, this rarely occurs naturally. |
+| **R2 Fan-Out** | A wallet needs ≥20 outbound transactions to ≥20 unique addresses **and** a temporal scatter→gather continuation. Small or synthetic cohorts often scatter without any gather phase. |
+| **R3 Sanctioned 1-Hop** | Requires a frozen sanctions seed to have a ≥0.01 ETH edge to another wallet in the graph. If no sanctioned seed appears as a graph node, zero flags are produced. |
+| **R4 PageRank** | Flags the continuous tail above the 90th percentile; on tiny graphs the percentile arithmetic produces edge effects, and known-address exclusion can suppress the only high-centrality node. |
 | **R5 Apriori** | Needs: (a) >=10 labelled training positives, (b) patterns that exceed `min_support = 0.05` with `lift >= 2.0` and `confidence >= 0.8`. All three can fail on small or homogeneous datasets. |
 
 ### The Compound Rule Effect
@@ -311,12 +349,12 @@ The High tier (>=60) requires **at least two rules to fire simultaneously**:
 
 ### How Sanctioned Addresses Work
 
-ChainLens loads sanctioned addresses from labels with `label = "sanctioned"`. The sanctioned addresses that fall into the **training split** become "seeds" for R3.
+ChainLens loads a **frozen sanctions snapshot** from `config/sanctions.json` (currently 120 OFAC SDN Ethereum addresses) and unions it with every labelled `sanctioned` address. Train/test split membership is irrelevant.
 
-Label sources include:
-- OFAC SDN list Ethereum addresses
-- Community darklists (e.g., Tornado Cash-linked addresses)
-- Kaggle fraud datasets with verified bad actors
+Seed sources include:
+- OFAC SDN Ethereum addresses (frozen snapshot in `config/sanctions.json`)
+- Labelled sanctioned addresses from the label store
+- Community darklists and Kaggle fraud labels remain separate label classes, not R3 seeds
 
 ### What "1-Hop" Means
 
@@ -328,7 +366,7 @@ Label sources include:
    Suspicious Wallet (flagged by R3)
 ```
 
-A wallet is flagged if it directly sent ETH to, or directly received ETH from, a sanctioned address. Two hops away is NOT flagged (too many false positives).
+A wallet is flagged if it directly sent ETH to, or directly received **at least 0.01 ETH** from, a sanctioned address. Two hops away is NOT flagged (too many false positives), and sub-0.01 ETH dust transfers are ignored. The rule reports the sanctioned exposure fraction and scales its 30-point contribution accordingly.
 
 ### Community Detection and Sanctioned Clusters
 
@@ -435,11 +473,11 @@ Each shows: `🚨 TRIGGERED (+N pts)` or `⚪ NOT TRIGGERED`, plus expandable ev
 
 | Card | Evidence shown |
 |---|---|
-| R1 Circular Flow | Cycle count, cycle paths, SCC size |
-| R2 Fan-Out | Unique counterparties, out/in ratio |
-| R3 Sanctioned 1-Hop | Seed address, direction (in/out/both), all seeds |
-| R4 PageRank | Actual PageRank score vs threshold |
-| R5 Apriori | Antecedent itemset, support, confidence, lift |
+| R1 Circular Flow | Cycle count, cycle paths (lengths 2–5, ±2% value tolerance), SCC size, duration |
+| R2 Scatter–Gather | Unique counterparties, outbound transactions, fanout ratio, gather intermediaries, collectors, gather fraction, temporal ordering (72h window) |
+| R3 Sanctioned 1-Hop | Seed addresses, direction (in/out/both), ETH amounts, dust filter (≥0.01 ETH), inflow/outflow exposure fraction, evidence strength |
+| R4 PageRank | Value-weighted PageRank score, percentile rank (≥90th pct), diagnostic top-5% marker, continuous strength, known entity hub filter |
+| R5 Apriori | Antecedent itemset, support, confidence, lift, matched boolean features |
 
 **Score Contribution Breakdown (horizontal bar chart):**
 - One bar per rule: red if triggered, grey if not
@@ -473,7 +511,7 @@ Each shows: `🚨 TRIGGERED (+N pts)` or `⚪ NOT TRIGGERED`, plus expandable ev
 
 **Purpose:** Inspect the raw output of each detection algorithm.
 
-Sub-tabs: **R1 · Circular Flow**, **R2 · Fan-Out**, **R3 · Sanctioned 1-Hop**, **R4 · PageRank Top 5%**, **R5 · Apriori Rules**, **DBSCAN Density**, **Louvain Communities**
+Sub-tabs: **R1 · Circular Flow**, **R2 · Scatter–Gather**, **R3 · Sanctioned 1-Hop**, **R4 · Continuous PageRank**, **R5 · Apriori Rules**, **DBSCAN Density**, **Louvain Communities**
 
 Each rule sub-tab shows a table of flagged wallets merged with their risk score and tier.
 
@@ -558,22 +596,33 @@ cp .env.example .env
 # Edit .env and add: ETHERSCAN_API_KEY=your_key_here
 ```
 
+### Interactive Console (Recommended)
+
+ChainLens includes an interactive terminal runner to execute pipelines, browse DuckDB tables, manage the dashboard, and run checks from a single menu:
+
+```bash
+uv run python full_runner.py
+```
+
 ### Run Sample Pipeline (No API Key Needed)
 
 ```bash
 uv run python run.py --mode sample
 ```
 
-Uses the fixture data in `data/sample/` — no internet connection required.
+Uses the fixture data in `data/sample/` — no internet connection or API key required.
 
 ### Run Real Pipeline
 
 ```bash
-# Full real-data fetch
+# Full real-data fetch (requires ETHERSCAN_API_KEY in .env)
 uv run python run.py --mode real --max-addresses 200
 
 # Skip re-fetching if transactions already cached
 uv run python run.py --mode real --skip-fetch
+
+# Force refresh cache
+uv run python run.py --mode real --refresh
 ```
 
 ### Launch Dashboard
@@ -583,10 +632,14 @@ uv run streamlit run dashboard.py
 # Opens at http://localhost:8501
 ```
 
-### Run Tests
+### Run Tests and Quality Assurance
 
 ```bash
-uv run pytest tests/ -v
+# Run complete test suite (45 unit & integration tests)
+uv run pytest tests/ -q
+
+# Run Ruff linter
+uv run ruff check .
 ```
 
 ---
@@ -609,10 +662,10 @@ downweight:
   known_address_categories: [exchange, bridge, mixer, contract]
 
 rules:
-  - id: R1   weight: 25   # cycle_length_min: 3, max: 5, value_tolerance: 0.05, time_window_hours: 24
-  - id: R2   weight: 20   # fanout_threshold: 20, min_outbound: 20, min_ratio: 0.5
-  - id: R3   weight: 30   # hops: 1, seed_source: train_only
-  - id: R4   weight: 15   # percentile: 95, alpha: 0.85
+  - id: R1   weight: 25   # length_min: 2, max: 5, value_tolerance: 0.02, time_window_hours: 24
+  - id: R2   weight: 20   # scatter gates + require_temporal_ordering: true, gather_window_hours: 72
+  - id: R3   weight: 30   # sanctions_path, min_value_eth: 0.01, min_direct_strength: 0.10
+  - id: R4   weight: 15   # continuous: true, min_percentile: 90, min_strength: 0.05
   - id: R5   weight: 20   # min_support: 0.05, min_lift: 2.0, min_confidence: 0.8
 ```
 
@@ -658,6 +711,7 @@ All written to `data/output/` after a successful pipeline run:
 
 | File | Format | Contents |
 |---|---|---|
+| `chainlens.duckdb` | DuckDB | Unified relational analytical warehouse containing all pipeline tables |
 | `scores.parquet` | Parquet | One row per wallet: address, raw_score, score, tier, top_driver, rules_version |
 | `scores.csv` | CSV | Same as above in CSV format |
 | `traces.parquet` | Parquet | Full per-wallet audit trace JSON: all rule hits, contributions, downweight details |
@@ -669,6 +723,7 @@ All written to `data/output/` after a successful pipeline run:
 | `splits.parquet` | Parquet | Train/test assignment per address |
 | `known_addresses.parquet` | Parquet | Snapshot of known entity registry used in this run |
 | `transactions_clean.parquet` | Parquet | De-duplicated, filtered transaction table |
+| `context_blocks.json` | JSON | Sampled block heights used for context address ingestion |
 | `evaluation.json` | JSON | P/R/F1, PR-AUC, confusion matrix at both operating thresholds |
 | `evaluation.md` | Markdown | Human-readable evaluation summary |
 | `ablation.csv` | CSV | Leave-one-rule-out ablation results per rule |
@@ -680,6 +735,7 @@ All written to `data/output/` after a successful pipeline run:
 
 ```
 ChainLens/
+├── full_runner.py          # Interactive CLI terminal console & runner
 ├── run.py                  # Pipeline orchestrator
 ├── fetch_data.py           # Stage 1: Etherscan ingestion + label loading
 ├── features.py             # Stage 2: Feature engineering (DuckDB SQL)
@@ -688,17 +744,18 @@ ChainLens/
 ├── evaluate.py             # Stage 6: P/R/F1 + ablation
 ├── dashboard.py            # Read-only Streamlit analyst workspace
 ├── config/
-│   ├── rules.yaml          # Locked rule weights and tier thresholds
+│   ├── rules.yaml          # Locked rule weights, thresholds, and paper refinements
 │   ├── detection.yaml      # Algorithm hyperparameters
 │   ├── data.yaml           # Data paths and sampling settings
+│   ├── sanctions.json      # Frozen OFAC sanctions snapshot (split-independent)
 │   └── known_addresses.json # Known entity registry
 ├── data/
 │   ├── sample/             # Fixture data (transactions, labels, known addresses)
 │   │   ├── transactions.parquet
 │   │   ├── labels_fixture.csv
 │   │   └── known_fixture.csv
-│   └── output/             # All pipeline artifacts (git-ignored)
-└── tests/                  # pytest test suite
+│   └── output/             # All pipeline artifacts (including chainlens.duckdb)
+└── tests/                  # pytest test suite (45 tests)
 ```
 
 ### Module Dependency Map

@@ -22,7 +22,7 @@
      - [Rule R1: Circular Flow & SCC Graph Traversal](#rule-r1-circular-flow-detection)
      - [Rule R2: Outbound Fan-Out Smurfing / Structuring](#rule-r2-outbound-fan-out)
      - [Rule R3: Sanctioned Entity 1-Hop Proximity](#rule-r3-sanctioned-entity-1-hop)
-     - [Rule R4: Network Prominence (Value-Weighted PageRank)](#rule-r4-value-weighted-pagerank-top-5)
+     - [Rule R4: Network Prominence (Value-Weighted PageRank)](#rule-r4-value-weighted-pagerank-continuous-tail)
      - [Unsupervised Clustering: DBSCAN Density Clustering](#unsupervised-dbscan-density-clustering)
      - [Community Partitioning: Louvain Modularity Maximization](#community-partitioning-louvain-modularity)
      - [Rule R5: Apriori Association Rule Mining](#rule-r5-apriori-association-rule-mining)
@@ -106,10 +106,10 @@ flowchart TD
 
     subgraph Stage 4: Pattern Detection Engine [patterns.py]
         GRAPH[NetworkX DiGraph Builder]
-        R1[R1: Tarjan SCC & Circular Flow]
-        R2[R2: Fan-Out / Smurfing Filter]
-        R3[R3: Sanctioned Entity 1-Hop Traversal]
-        R4[R4: Value-Weighted PageRank (Top 5%)]
+        R1[R1: Tarjan SCC & Cycles 2–5]
+        R2[R2: Scatter–Gather Smurf Motif]
+        R3[R3: Frozen Sanctions + Exposure]
+        R4[R4: Continuous PageRank Tail]
         DB[Unsupervised DBSCAN Outlier Detector]
         LOUV[Louvain Modularity Community Partition]
         R5[R5: Apriori Association Rule Miner]
@@ -177,19 +177,20 @@ The system is organized into modular, single-responsibility components:
 
 | Module | Purpose | Primary Inputs | Primary Outputs |
 |---|---|---|---|
-| [`fetch_data.py`](file:///home/codez/Desktop/Chain-Analysis/ChainLens/fetch_data.py) | Ingestion & Caching | Etherscan API, `.env`, `data/sample/` | `raw_transactions.parquet`, `splits.parquet`, `labels.parquet` |
-| [`features.py`](file:///home/codez/Desktop/Chain-Analysis/ChainLens/features.py) | Data Cleaning & Feature Generation | Raw transactions, DuckDB connection | `transactions_clean.parquet`, `wallet_features.parquet`, `scaler.json` |
-| [`patterns.py`](file:///home/codez/Desktop/Chain-Analysis/ChainLens/patterns.py) | Graph & ML Pattern Extraction | Clean transactions, scaled features, detection configs | `flags.parquet`, `graph_edges.parquet`, `louvain_communities`, `apriori_rules.json` |
-| [`scoring.py`](file:///home/codez/Desktop/Chain-Analysis/ChainLens/scoring.py) | Risk Scoring & Trace Generation | Flags, feature set, `rules.yaml`, `known_addresses.json` | `scores.parquet`, `traces.parquet`, `audit_case_files.json` |
-| [`evaluate.py`](file:///home/codez/Desktop/Chain-Analysis/ChainLens/evaluate.py) | Evaluation & Ablation Testing | Scores, ground-truth labels, splits | `evaluation.json`, `evaluation.md`, `ablation.csv` |
-| [`run.py`](file:///home/codez/Desktop/Chain-Analysis/ChainLens/run.py) | Pipeline Orchestration & CLI | CLI parameters, configuration files | Pipeline execution flow, provenance metadata (`run_info.json`) |
-| [`dashboard.py`](file:///home/codez/Desktop/Chain-Analysis/ChainLens/dashboard.py) | Read-Only Analyst Workspace | Static output artifacts (`data/output/`) | Interactive 7-tab Streamlit dashboard |
+| [`full_runner.py`](file:///home/codez/Desktop/Chain-Analysis/ChainLens-v2/full_runner.py) | Interactive CLI Runner & Manager | User interactive input, DuckDB | Workflow execution, database querying, test runs |
+| [`fetch_data.py`](file:///home/codez/Desktop/Chain-Analysis/ChainLens-v2/fetch_data.py) | Ingestion & Caching | Etherscan API, `.env`, `data/sample/` | `raw_transactions.parquet`, `splits.parquet`, `labels.parquet` |
+| [`features.py`](file:///home/codez/Desktop/Chain-Analysis/ChainLens-v2/features.py) | Data Cleaning & Feature Generation | Raw transactions, DuckDB connection | `transactions_clean.parquet`, `wallet_features.parquet`, `scaler.json` |
+| [`patterns.py`](file:///home/codez/Desktop/Chain-Analysis/ChainLens-v2/patterns.py) | Graph & ML Pattern Extraction | Clean transactions, scaled features, detection configs | `flags.parquet`, `graph_edges.parquet`, `louvain_communities`, `apriori_rules.json` |
+| [`scoring.py`](file:///home/codez/Desktop/Chain-Analysis/ChainLens-v2/scoring.py) | Risk Scoring & Trace Generation | Flags, feature set, `rules.yaml`, `known_addresses.json` | `scores.parquet`, `traces.parquet`, `audit_case_files.json` |
+| [`evaluate.py`](file:///home/codez/Desktop/Chain-Analysis/ChainLens-v2/evaluate.py) | Evaluation & Ablation Testing | Scores, ground-truth labels, splits | `evaluation.json`, `evaluation.md`, `ablation.csv` |
+| [`run.py`](file:///home/codez/Desktop/Chain-Analysis/ChainLens-v2/run.py) | Pipeline Orchestration & CLI | CLI parameters, configuration files | Pipeline execution flow, provenance metadata (`run_info.json`) |
+| [`dashboard.py`](file:///home/codez/Desktop/Chain-Analysis/ChainLens-v2/dashboard.py) | Read-Only Analyst Workspace | Static output artifacts (`data/output/`) | Interactive 7-tab Streamlit dashboard |
 
 ---
 
 ### 2.4 Data Architecture & Storage Schema
 
-ChainLens employs Apache Parquet as its primary persistence standard, providing high-performance columnar compression, type-strict schema preservation, and fast vectorized reading.
+ChainLens employs Apache Parquet and an embedded DuckDB database file as its primary persistence standard, providing high-performance columnar compression, type-strict schema preservation, and fast vectorized reading.
 
 ```
 data/
@@ -198,6 +199,7 @@ data/
 │   ├── labels_fixture.csv             <- Ground truth labels for testing
 │   └── known_fixture.csv              <- Known benign addresses snapshot
 └── output/                            <- Dynamic pipeline artifact directory
+    ├── chainlens.duckdb               <- Unified relational analytical warehouse
     ├── transactions_clean.parquet     <- De-duplicated, normalized transactions
     ├── wallet_features.parquet        <- 14 raw + 5 scaled features per address
     ├── graph_edges.parquet            <- Directed aggregated flow edges
@@ -207,6 +209,7 @@ data/
     ├── splits.parquet                 <- Deterministic train/test assignments
     ├── labels.parquet                 <- Harmonized ground-truth annotations
     ├── known_addresses.parquet        <- Registry snapshot of downweighted entities
+    ├── context_blocks.json            <- Sampled block heights for context addresses
     ├── evaluation.json / .md          <- Classification metrics (P, R, F1, PR-AUC)
     ├── ablation.csv                   <- Leave-one-rule-out impact statistics
     └── run_info.json                  <- System provenance, package hashes, timestamps
@@ -214,7 +217,7 @@ data/
 
 #### Core Data Schemas:
 
-##### 1. Clean Transactions Schema (`transactions_clean.parquet`)
+##### 1. Clean Transactions Schema (`transactions_clean.parquet` & DuckDB `transactions`)
 - `tx_hash` (`VARCHAR`): 66-character lowercase Ethereum transaction hash.
 - `block_number` (`BIGINT`): Block index in the canonical chain.
 - `block_timestamp` (`TIMESTAMPTZ`): UTC execution timestamp.
@@ -225,24 +228,24 @@ data/
 - `receipt_status` (`INTEGER`): EVM status (1 = success; 0 = reverted).
 - `is_error` (`INTEGER`): Transaction error flag.
 
-##### 2. Scored Wallets Schema (`scores.parquet`)
+##### 2. Scored Wallets Schema (`scores.parquet` & DuckDB `risk_scores`)
 - `address` (`VARCHAR`): Target Ethereum address (primary key).
-- `raw_score` (`INTEGER`): Unclamped additive rule score sum.
+- `raw_score` (`DOUBLE`): Unclamped additive rule score sum (continuous strengths supported).
 - `score` (`INTEGER`): Clamped final risk score (0 to 100).
 - `tier` (`VARCHAR`): Risk classification (`High`, `Medium`, `Low`).
 - `top_driver` (`VARCHAR`): Rule ID contributing the highest score share.
 - `rules_version` (`VARCHAR`): Configured rule contract version label.
 
-##### 3. Forensic Trace Schema (`traces.parquet`)
+##### 3. Forensic Trace Schema (`traces.parquet` & DuckDB `score_trace`)
 - `address` (`VARCHAR`): Target address.
-- `raw_score` (`INTEGER`): Sum of fired rule weights before downweighting.
-- `final_score` (`INTEGER`): Post-downweight, clamped score.
+- `raw_score` (`DOUBLE`): Sum of fired rule contributions before downweighting.
+- `adjusted_raw_score` (`DOUBLE`): Raw score scaled by downweight factor.
+- `final_score` (`INTEGER`): Post-downweight, clamped integer score (0–100).
 - `tier` (`VARCHAR`): Assigned risk tier.
-- `rule_hits` (`LIST<VARCHAR>`): Array of triggered rule identifiers.
-- `rule_contributions` (`STRUCT`): Key-value points awarded per rule.
-- `downweight_factor` (`DOUBLE`): 0.3 if known entity; 1.0 otherwise.
-- `downweight_applied` (`BOOLEAN`): True if entity was recognized as benign.
-- `evidence` (`JSON`): Deep forensic evidentiary payload per rule.
+- `rules` (`JSON` / `STRUCT`): Per-rule breakdown including `hit` (`BOOLEAN`), `weight` (`INTEGER`), `strength` (`DOUBLE`), `contribution` (`DOUBLE`), and evidentiary inputs.
+- `downweight` (`STRUCT`): Downweight factor (0.3 if known entity; 1.0 otherwise), category, and status.
+- `clamped` (`BOOLEAN`): True if score exceeded 100 before clamping.
+- `trace_json` (`VARCHAR`): Full serialized case file JSON.
 
 ---
 
@@ -358,37 +361,46 @@ Standard ML models often suffer from data leakage when feature scalers are fitte
 - **Typology:** Wash trading, layering, and peeling chains where capital moves through intermediary accounts before returning to the originator.
 - **Algorithm:**
   1. Identifies Strongly Connected Components (SCCs) using Tarjan's algorithm on directed graph $G = (V, E)$.
-  2. Bounded cycle search isolates cycles of length $3 \le k \le 5$.
-  3. Applies uniform wash tolerance: the value of all edges in the cycle must fall within $\pm 5\%$ of the initial transfer:
-     $$\frac{\max_{e \in C} \text{value}(e) - \min_{e \in C} \text{value}(e)}{\max_{e \in C} \text{value}(e)} \le 0.05$$
+  2. Bounded cycle search isolates cycles of length **$2 \le k \le 5$** (length-2 self-trade pairs per Victor & Weintraud).
+  3. Applies uniform wash tolerance: the value of all edges in the cycle must fall within **$\pm 2\%$** of the initial transfer:
+     $$\frac{\max_{e \in C} \text{value}(e) - \min_{e \in C} \text{value}(e)}{\max_{e \in C} \text{value}(e)} \le 0.02$$
   4. Temporal windowing: the delta between the first and last transaction in the cycle must not exceed 24 hours.
-- **Complexity Protections:** SCCs containing $> 5,000$ nodes are capped to prevent combinatorial path explosion.
+- **Complexity Protections:** SCCs containing $> 5,000$ nodes are capped to prevent combinatorial path explosion; cycles are canonicalised to avoid rotation duplicates.
 - **Assigned Weight:** **25 points**.
 
-#### Rule R2: Outbound Fan-Out
+#### Rule R2: Scatter–Gather Smurf Motif
 - **Typology:** Smurfing and structuring schemes involving rapid outbound dispersion to avoid single-transaction threshold reporting.
-- **Detection Criteria:** Evaluates a strict three-gate logical conjunction:
+- **Scatter Criteria:** A strict three-gate logical conjunction:
   $$\text{Gate}_1: \text{unique\_counterparties} \ge 20$$
   $$\text{Gate}_2: \text{tx\_count\_out} \ge 20$$
   $$\text{Gate}_3: \text{fanout\_ratio} \ge 0.5$$
-- **Assigned Weight:** **20 points**.
+- **Gather Criteria (Starnini et al.):**
+  - At least 2 intermediaries, or 10% of scattering counterparties, must forward funds onwards.
+  - At least 1 distinct collector must receive those forwarded funds.
+  - Gather edges must start after their scatter edge and within a 72-hour window.
+- **Assigned Weight:** **20 points** (full weight only when the ordered motif is confirmed).
 
 #### Rule R3: Sanctioned Entity 1-Hop
 - **Typology:** Direct exposure to OFAC-sanctioned addresses, known exploiters, or blacklisted mixing pools.
 - **Algorithm:**
-  - Extracts sanctioned entities present in the **training split only** to prevent evaluation contamination.
-  - Queries graph adjacency matrices for immediate predecessor or successor relationships:
-    $$(u, v) \in E \quad \text{where } u \in \text{Sanctioned}_{\text{train}} \lor v \in \text{Sanctioned}_{\text{train}}$$
+  - Seeds come from the frozen `config/sanctions.json` OFAC snapshot unioned with all labelled sanctioned addresses; **train/test membership is irrelevant**.
+  - Ignores transfers below **0.01 ETH** to defeat dusting attacks.
+  - Queries immediate predecessor/successor relationships:
+    $$(u, v) \in E \quad \text{where } u \in \text{Sanctioned} \lor v \in \text{Sanctioned}$$
+  - Computes `inflow_exposure_fraction` and `outflow_exposure_fraction`, then sets R3 strength to `max(exposure, 0.10)`.
 - **Scope Restriction:** Strictly limited to 1-hop transactions. Multi-hop propagation is handled via Louvain community clustering to limit false positives.
-- **Assigned Weight:** **30 points**.
+- **Assigned Weight:** **30 points × strength**.
 
-#### Rule R4: Value-Weighted PageRank (Top 5%)
+#### Rule R4: Value-Weighted PageRank (Continuous Tail)
 - **Typology:** Hub identification in fund-routing rings and dominant money mules.
 - **Algorithm:** PageRank over directed graph $G$ using transaction value weights:
   $$\mathbf{PR}(u) = \frac{1 - \alpha}{|V|} + \alpha \sum_{v \in M(u)} \frac{\mathbf{PR}(v) \cdot w(v, u)}{\sum_{k \in N_{\text{out}}(v)} w(v, k)}$$
   Where $\alpha = 0.85$, $w(v, u) = \text{total\_value\_eth}(v \to u)$, and convergence tolerance $\tau = 1.0 \times 10^{-6}$.
-- **Activation Gate:** Entities scoring in the top 5% ($\ge 95\text{th percentile}$) are flagged.
-- **Assigned Weight:** **15 points**.
+- **Activation:** Continuous upper-tail strength from the 90th percentile:
+  $$\text{strength}(u) = \operatorname{clamp}\left(\frac{\text{percentile}(u) - 90}{10}, 0, 1\right)$$
+  Contributions below 0.05 strength are discarded; the 95th percentile is retained as a diagnostic `top5` marker.
+- **Known-address exclusion:** Exchange, bridge, mixer, and contract addresses are never R4-flagged.
+- **Assigned Weight:** **15 points × strength**.
 
 #### Unsupervised DBSCAN Density Clustering
 - **Typology:** High-dimensional behavioral outlier identification without requiring a predefined cluster count.
@@ -413,7 +425,7 @@ Standard ML models often suffer from data leakage when feature scalers are fitte
      - `many_round`: $\text{round\_number\_ratio} \ge 0.5$
      - `is_contract`: $\text{is\_contract} = \text{True}$
      - `recent_account`: active within the final 7 days of the observation window
-     - `high_pagerank`: wallet flagged by R4
+     - `high_pagerank`: wallet in the diagnostic top 5% of PageRank ($\ge 95\text{th percentile}$)
      - `dbscan_noise`: wallet flagged as a DBSCAN outlier
   2. Generates frequent itemsets on **training split positives only** with $\text{min\_support} = 0.05$.
   3. Derives association rules where consequent is `flagged = True`.
@@ -430,17 +442,17 @@ Standard ML models often suffer from data leakage when feature scalers are fitte
 ```
 Rule Weights:
   R1 (Circular Flow):       25 pts
-  R2 (Fan-Out):             20 pts
+  R2 (Scatter–Gather):      20 pts
   R3 (Sanctioned 1-Hop):    30 pts
-  R4 (PageRank Top 5%):     15 pts
+  R4 (Continuous PageRank): 15 pts
   R5 (Apriori Rule Match):  20 pts
                            ───────
   Max Possible Raw Score:  110 pts
 ```
 
 #### Scoring Formulation
-1. **Raw Score Calculation:**
-   $$\text{raw\_score}(a) = \sum_{i=1}^{5} w_i \cdot \mathbf{1}_{R_i(a) = \text{True}}$$
+1. **Raw Score Calculation:** R1, R2 and R5 are binary; R3 and R4 carry an evidence strength $s_i \in [0,1]$:
+   $$\text{raw\_score}(a) = \sum_{i=1}^{5} w_i \cdot s_i(a), \qquad s_i(a) = 1 \text{ for binary rules}$$
 2. **Benign Entity Downweighting:** High-volume institutional entities (e.g., Uniswap routers, exchange hot wallets) often display structural patterns that trigger rules like fan-out or high PageRank. If an address is listed in `known_addresses.json` under categories such as `exchange`, `bridge`, `mixer`, or `contract`, its raw score is scaled by a downweight factor of $0.3\times$:
    $$\text{adjusted\_score}(a) = \begin{cases} \text{round}\big(\text{raw\_score}(a) \times 0.3\big), & \text{if } a \in \text{KnownRegistry} \\ \text{raw\_score}(a), & \text{otherwise} \end{cases}$$
 3. **Clamping:** The final score is clamped to the range $[0, 100]$:
@@ -500,10 +512,10 @@ The evaluation framework (`evaluate.py`) assesses pipeline quality on the held-o
 | **FR-04** | Deduplicate mirrored sender/receiver transactions and filter out reverted operations. |
 | **FR-05** | Compute 14 behavioral features per wallet using DuckDB fixed-point decimal arithmetic. |
 | **FR-06** | Normalize features using parameters fitted strictly on the training partition. |
-| **FR-07** | Construct directed flow graphs and detect circular cycles ($3 \le k \le 5$) within 24-hour windows. |
-| **FR-08** | Detect fan-out smurfing patterns via three-gate parametric filters. |
-| **FR-09** | Detect 1-hop connections to known sanctioned seed addresses from the training split. |
-| **FR-10** | Calculate value-weighted PageRank metrics and flag entities in the 95th percentile. |
+| **FR-07** | Construct directed flow graphs and detect circular cycles ($2 \le k \le 5$) with ±2% value tolerance within 24-hour windows. |
+| **FR-08** | Detect scatter→gather smurf motifs through temporal ordering of fan-out and onward transfers. |
+| **FR-09** | Detect ≥0.01 ETH 1-hop exposure to frozen OFAC sanctions seeds, independent of train/test split, and report exposure fractions. |
+| **FR-10** | Calculate value-weighted PageRank and score the continuous upper tail (≥90th percentile), excluding known hubs. |
 | **FR-11** | Identify behavioral outliers using unsupervised DBSCAN density clustering. |
 | **FR-12** | Partition transaction subgraphs into communities using Louvain modularity optimization. |
 | **FR-13** | Mine association rules with Apriori on training split bad actors and flag matching wallets. |
@@ -511,7 +523,7 @@ The evaluation framework (`evaluate.py`) assesses pipeline quality on the held-o
 | **FR-15** | Apply a $0.3\times$ downweight factor to verified benign entities (exchanges, bridges, contracts). |
 | **FR-16** | Export full per-wallet forensic traces, evidentiary JSONs, and summary Parquet files. |
 | **FR-17** | Compute Precision, Recall, F1, and PR-AUC, and execute leave-one-rule-out ablation testing. |
-| **FR-18** | Provide a read-only Streamlit dashboard with seven interactive analytical tabs. |
+| **FR-18** | Provide an interactive CLI terminal runner (`full_runner.py`) and a read-only Streamlit dashboard with seven interactive analytical tabs. |
 
 ---
 

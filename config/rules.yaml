@@ -19,9 +19,11 @@ rules:
     name: circular_flow
     weight: 25
     params:
-      cycle_length_min: 3
+      # [P1] Victor & Weintraud also report length-2 self-trade pairs.
+      cycle_length_min: 2
       cycle_length_max: 5
-      value_tolerance: 0.05
+      # [P1] ETH transfers match within gas-fee noise; ±2% replaces the old ±5%.
+      value_tolerance: 0.02
       time_window_hours: 24
       max_cycles_per_address: 5
       max_scc_size: 5000
@@ -35,6 +37,15 @@ rules:
       fanout_threshold: 20
       min_outbound: 20
       min_ratio: 0.5
+      # [P4] Starnini et al.: a smurf motif must scatter before it gathers.
+      # The scatter gate above is only the first half of the motif; a wallet is
+      # flagged once at least a fraction of its intermediaries forward funds
+      # onwards after the scatter edge, within the gather window.
+      require_temporal_ordering: true
+      gather_window_hours: 72
+      min_gather_fraction: 0.1
+      min_gather_intermediaries: 2
+      min_collectors: 1
       # Deck diagnostics, recorded in the trace but not scored in outbound_fanout mode.
       deck_min_out_in_ratio: 5.0
       deck_min_counterparties: 50
@@ -44,16 +55,33 @@ rules:
     weight: 30
     params:
       hops: 1
-      seed_source: train_only
+      # [P6][P8] Decoupled from the train/test split: a maintained sanctions
+      # snapshot plus any labelled sanctioned address. Never train-only.
+      seed_source: frozen_sanctions_plus_labels
+      sanctions_path: config/sanctions.json
+      # [P6] Dusting resilience: ignore transfers below 0.01 ETH.
+      min_value_eth: 0.01
+      # Continuous exceedance is scaled by exposure; a confirmed direct link
+      # keeps a 10% strength floor so large legitimate volume cannot wash it out.
+      min_direct_strength: 0.1
+      min_strength: 0.0
 
   - id: R4
     name: pagerank_top5pct
     weight: 15
     params:
+      # 95th percentile is retained as a diagnostic "top 5%" marker.
       percentile: 95
       alpha: 0.85
       weight: total_value_eth
       zero_weight_floor: 1.0e-12
+      # [P3][P10] PageRank is a continuous feature, not a binary 5% gate.
+      continuous: true
+      min_percentile: 90
+      min_strength: 0.05
+      # [P9] Exchanges, bridges, mixers and contracts are high-volume hubs,
+      # not risk signals: never flag them on PageRank alone.
+      exclude_known_categories: [exchange, bridge, mixer, contract]
 
   - id: R5
     name: apriori_match

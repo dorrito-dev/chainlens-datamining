@@ -544,6 +544,31 @@ if "triage_page_size" not in st.session_state:
     st.session_state.triage_page_size = 50
 
 
+def navigate(view: str, wallet: str | None = None) -> None:
+    """Request a view change from a button, applied before the nav radio renders.
+
+    Writing st.session_state.nav_radio directly here would fail: the sidebar
+    radio is already instantiated by the time row buttons run. Stash the request
+    and let main() apply it at the start of the next run.
+    """
+    if wallet:
+        st.session_state.selected_wallet = wallet
+    st.session_state["_pending_view"] = view
+    st.rerun()
+
+
+def copy_popover(address: str, key: str) -> None:
+    """Compact per-row control exposing the full address with a copy button."""
+    with st.popover("⧉", help="Show and copy wallet address", key=key):
+        st.code(address, language=None)
+
+
+def copyable_address(address: str) -> None:
+    """Full address in a code block; Streamlit adds a one-click copy icon."""
+    st.code(address, language=None)
+
+
+
 # ── view: Overview ────────────────────────────────────────────────────────────
 def render_overview(bundle: dict[str, Any]) -> None:
     scores: pd.DataFrame = bundle["scores"]
@@ -651,7 +676,7 @@ def render_overview(bundle: dict[str, Any]) -> None:
             flags_val = row.flag_count
             lbl_val = getattr(row, "label", "") or "—"
 
-            c_badge, c_addr, c_score, c_driver, c_flags, c_label, c_action = st.columns([1, 2.5, 1.2, 1.5, 1, 1.5, 1.2])
+            c_badge, c_addr, c_score, c_driver, c_flags, c_label, c_copy, c_action = st.columns([1, 2.5, 1.2, 1.5, 1, 1.5, 0.5, 1.2])
             with c_badge:
                 st.markdown(tier_badge(tier_val), unsafe_allow_html=True)
             with c_addr:
@@ -664,11 +689,11 @@ def render_overview(bundle: dict[str, Any]) -> None:
                 st.markdown(f"{flags_val} signal(s)")
             with c_label:
                 st.markdown(f"<span class='cl-muted'>{lbl_val}</span>", unsafe_allow_html=True)
+            with c_copy:
+                copy_popover(addr, f"top_copy_{addr}")
             with c_action:
                 if st.button("Dossier →", key=f"top_{addr}"):
-                    st.session_state.selected_wallet = addr
-                    st.session_state.active_view = "Wallet dossier"
-                    st.rerun()
+                    navigate("Wallet dossier", addr)
 
 
 # ── view: Triage ──────────────────────────────────────────────────────────────
@@ -837,7 +862,7 @@ def render_triage(bundle: dict[str, Any]) -> None:
         meta_sub = f"{known_val} · {split_val}" if known_val != "—" else split_val
         label_disp = f"{label_val} ({source_val})" if source_val and label_val != "—" else label_val
 
-        c_t, c_a, c_s, c_d, c_sig, c_m, c_l, c_act = st.columns([0.8, 2.5, 1, 1.2, 1, 1.2, 1.5, 1])
+        c_t, c_a, c_s, c_d, c_sig, c_m, c_l, c_copy, c_act = st.columns([0.8, 2.5, 1, 1.2, 1, 1.2, 1.5, 0.5, 1])
         with c_t:
             st.markdown(tier_badge(tier_val), unsafe_allow_html=True)
         with c_a:
@@ -853,11 +878,11 @@ def render_triage(bundle: dict[str, Any]) -> None:
             st.markdown(f"<span class='cl-muted'>{meta_sub}</span>", unsafe_allow_html=True)
         with c_l:
             st.markdown(f"<span class='cl-muted'>{short(label_disp, 16, 4)}</span>", unsafe_allow_html=True)
+        with c_copy:
+            copy_popover(addr, f"triage_copy_{addr}")
         with c_act:
             if st.button("Inspect", key=f"triage_btn_{addr}"):
-                st.session_state.selected_wallet = addr
-                st.session_state.active_view = "Wallet dossier"
-                st.rerun()
+                navigate("Wallet dossier", addr)
 
 
 # ── view: Wallet dossier ──────────────────────────────────────────────────────
@@ -917,7 +942,8 @@ def render_dossier(bundle: dict[str, Any]) -> None:
     st.markdown("---")
     top_c1, top_c2, top_c3 = st.columns([3, 1, 1])
     with top_c1:
-        st.markdown(f"### Address `{addr}`")
+        st.markdown("### Address")
+        copyable_address(addr)
         badge_html = tier_badge(tier_val)
         known_chip = f"<span class='cl-chip'>Known: {known_val} (0.3x multiplier)</span>" if known_val else ""
         split_chip = f"<span class='cl-chip'>Split: {split_val}</span>" if split_val else ""
@@ -949,10 +975,10 @@ def render_dossier(bundle: dict[str, Any]) -> None:
     else:
         rules_data = trace["rules"]
         rule_cards = [
-            ("R1", "Circular Flow Detection", 25, "Short cyclical transfer flow within 24h & uniform value"),
-            ("R2", "Outbound Fan-Out", 20, "High outbound counterparty dispersion and fanout ratio"),
-            ("R3", "Sanctioned Entity 1-Hop", 30, "Direct 1-hop inbound/outbound connection to OFAC seed"),
-            ("R4", "PageRank Network Prominence", 15, "Transaction graph centrality within top 5% value-weighted"),
+            ("R1", "Circular Flow Detection", 25, "Cycle length 2–5, values within ±2%, completed within 24h"),
+            ("R2", "Scatter–Gather Smurf Motif", 20, "Scatter precedes gather through intermediaries within 72h"),
+            ("R3", "Sanctioned Entity 1-Hop", 30, "≥0.01 ETH direct exposure to a frozen OFAC seed, scaled by exposure"),
+            ("R4", "PageRank Network Prominence", 15, "Continuous value-weighted centrality tail (≥90th pct)"),
             ("R5", "Apriori Behavioural Match", 20, "Frequent association itemset matching known illicit profiles"),
         ]
 
@@ -960,7 +986,8 @@ def render_dossier(bundle: dict[str, Any]) -> None:
         for i, (rid, rname, rwt, rdesc) in enumerate(rule_cards):
             rinfo = rules_data.get(rid, {})
             triggered = bool(rinfo.get("hit", False))
-            pts = int(rinfo.get("contribution", 0))
+            pts = float(rinfo.get("contribution", 0))
+            pts_label = f"{pts:.1f}".rstrip("0").rstrip(".") if pts else "0"
             inputs = rinfo.get("inputs", {})
 
             with cols[i]:
@@ -972,7 +999,7 @@ def render_dossier(bundle: dict[str, Any]) -> None:
                         <div style="font-weight:700; color:{'#f87171' if triggered else '#94a3b8'}; font-size:0.85rem;">{rid} · {rwt} pts</div>
                         <div style="font-size:0.8rem; font-weight:600; margin:4px 0;">{rname}</div>
                         <div style="font-size:0.75rem; color:#64748b; margin-bottom:8px;">{rdesc}</div>
-                        <div style="font-size:0.85rem; font-weight:700;">{'🚨 TRIGGERED (+'+str(pts)+' pts)' if triggered else '⚪ NOT TRIGGERED'}</div>
+                        <div style="font-size:0.85rem; font-weight:700;">{'🚨 TRIGGERED (+'+pts_label+' pts)' if triggered else '⚪ NOT TRIGGERED'}</div>
                     </div>
                     """,
                     unsafe_allow_html=True,
@@ -993,7 +1020,7 @@ def render_dossier(bundle: dict[str, Any]) -> None:
             y=list(rule_pts.keys()),
             orientation="h",
             marker_color=["#ef4444" if v > 0 else "#475569" for v in rule_pts.values()],
-            text=[f"+{v} pts" if v > 0 else "0" for v in rule_pts.values()],
+            text=[f"+{float(v):.1f} pts" if v > 0 else "0" for v in rule_pts.values()],
             textposition="auto",
         ))
         chart_layout(fig_bar, height=220, xaxis_title="Score Points", yaxis_title="")
@@ -1109,31 +1136,92 @@ def render_network(bundle: dict[str, Any]) -> None:
         st.warning("Graph edges artifact (`graph_edges.parquet`) is empty or missing.")
         return
 
-    # Focal wallet
-    default_focus = st.session_state.selected_wallet or scores.sort_values("score", ascending=False).iloc[0]["address"]
-    c1, c2, c3, c4 = st.columns(4)
+    # Connectivity is computed up front so the page can default to a wallet
+    # that actually has a neighbourhood worth showing.
+    endpoints = pd.concat([edges["from_address"], edges["to_address"]], ignore_index=True)
+    degree = endpoints.value_counts()
+    score_lookup = dict(zip(scores["address"], scores["score"], strict=False))
+    tier_lookup = dict(zip(scores["address"], scores["tier"], strict=False))
+    flag_lookup = dict(zip(scores["address"], scores["primary_flag"], strict=False))
+
+    def neighbours(address: str) -> set[str]:
+        out = set(edges.loc[edges["from_address"] == address, "to_address"])
+        inbound = set(edges.loc[edges["to_address"] == address, "from_address"])
+        return out | inbound
+
+    def default_focus_for(selected: str) -> str:
+        """Keep an explicitly chosen wallet only if it has a usable ego network."""
+        if selected and len(neighbours(selected)) >= 3:
+            return selected
+        pool = scores[scores["tier"].isin(["high", "medium"])]
+        pool = pool[pool["address"].isin(degree.index)]
+        if pool.empty:
+            pool = scores[scores["address"].isin(degree.index)]
+        if pool.empty:
+            return selected or scores.iloc[0]["address"]
+        ranked = pool.assign(connections=pool["address"].map(degree))
+        return str(ranked.sort_values(["connections", "score"], ascending=False).iloc[0]["address"])
+
+    selected = st.session_state.selected_wallet
+    if st.session_state.get("net_focus_for") != selected:
+        st.session_state["net_focus_for"] = selected
+        st.session_state["net_focus"] = default_focus_for(selected)
+
+    hubs = degree.head(10).index.tolist()
+    hub_labels: dict[str, str] = {}
+    for hub in hubs:
+        label = f"{short(hub, 6, 4)} · {int(degree.get(hub, 0))} links · {tier_lookup.get(hub, 'low')}"
+        while label in hub_labels:
+            label += " "
+        hub_labels[label] = hub
+
+    def apply_hub() -> None:
+        pick = st.session_state.get("net_hub_pick")
+        if pick in hub_labels:
+            st.session_state["net_focus"] = hub_labels[pick]
+
+    c1, c2, c3, c4, c5 = st.columns([2.2, 2.1, 0.9, 1.2, 1.6])
     with c1:
-        focus_addr = st.text_input("Focal Address (0x...)", value=default_focus).strip().lower()
+        focus_addr = st.text_input("Focal Address (0x...)", key="net_focus").strip().lower()
     with c2:
-        max_hops = st.selectbox("Max Hops", options=[1, 2], index=0)
+        st.selectbox(
+            "Or pick a hub",
+            options=list(hub_labels),
+            index=None,
+            placeholder="Most connected…",
+            key="net_hub_pick",
+            on_change=apply_hub,
+        )
     with c3:
-        max_nodes = st.slider("Max Subgraph Nodes", min_value=10, max_value=80, value=35)
+        max_hops = st.selectbox("Max Hops", options=[1, 2], index=1)
     with c4:
+        max_nodes = st.slider("Max Subgraph Nodes", min_value=10, max_value=80, value=35)
+    with c5:
         color_by = st.selectbox("Color Nodes By", options=["Risk Tier", "Primary Flag", "Louvain Community", "DBSCAN Cluster"])
 
-    # Extract ego subgraph
+    # Extract ego subgraph. Direct neighbours are always kept; second-hop nodes
+    # fill the remaining budget by degree so the result is deterministic.
     hop1_out = edges[edges["from_address"] == focus_addr]["to_address"].tolist()
     hop1_in = edges[edges["to_address"] == focus_addr]["from_address"].tolist()
-    sub_nodes = set([focus_addr] + hop1_out + hop1_in)
+    sub_nodes = {focus_addr, *hop1_out, *hop1_in}
 
     if max_hops == 2 and len(sub_nodes) < max_nodes:
-        hop1_list = list(sub_nodes)
-        hop2 = edges[edges["from_address"].isin(hop1_list) | edges["to_address"].isin(hop1_list)]
-        sub_nodes.update(hop2["from_address"].tolist() + hop2["to_address"].tolist())
+        hop2 = edges[edges["from_address"].isin(sub_nodes) | edges["to_address"].isin(sub_nodes)]
+        extra = (set(hop2["from_address"]) | set(hop2["to_address"])) - sub_nodes
+        ranked_extra = sorted(extra, key=lambda node: (-int(degree.get(node, 0)), node))
+        sub_nodes.update(ranked_extra[: max_nodes - len(sub_nodes)])
 
-    # Limit to max_nodes
+    # Safety limit, never drop the focal node.
     if len(sub_nodes) > max_nodes:
-        sub_nodes = set([focus_addr] + list(sub_nodes - {focus_addr})[: max_nodes - 1])
+        ranked_nodes = sorted(sub_nodes - {focus_addr}, key=lambda node: (-int(degree.get(node, 0)), node))
+        sub_nodes = {focus_addr, *ranked_nodes[: max_nodes - 1]}
+
+    focus_links = len(set(hop1_out) | set(hop1_in))
+    if focus_links <= 1:
+        st.caption(
+            f"⚠️ Focal wallet has {focus_links} connection in the graph. "
+            "Set Max Hops to 2, or pick a hub from the dropdown above."
+        )
 
     sub_edges = edges[edges["from_address"].isin(sub_nodes) & edges["to_address"].isin(sub_nodes)]
     edge_pairs = tuple((str(r.from_address), str(r.to_address)) for r in sub_edges.itertuples())
@@ -1154,9 +1242,6 @@ def render_network(bundle: dict[str, Any]) -> None:
     )
 
     node_x, node_y, node_color, node_text, node_size = [], [], [], [], []
-    score_lookup = dict(zip(scores["address"], scores["score"], strict=False))
-    tier_lookup = dict(zip(scores["address"], scores["tier"], strict=False))
-    flag_lookup = dict(zip(scores["address"], scores["primary_flag"], strict=False))
 
     for node in sub_nodes:
         if node in pos:
@@ -1220,9 +1305,10 @@ def render_network(bundle: dict[str, Any]) -> None:
         )
     with col_exp2:
         if st.button("Inspect Focal Wallet in Dossier"):
-            st.session_state.selected_wallet = focus_addr
-            st.session_state.active_view = "Wallet dossier"
-            st.rerun()
+            if focus_addr in set(scores["address"]):
+                navigate("Wallet dossier", focus_addr)
+            else:
+                st.warning("Focal address is not a scored wallet.")
 
 
 # ── view: Patterns ────────────────────────────────────────────────────────────
@@ -1259,13 +1345,13 @@ def render_patterns(bundle: dict[str, Any]) -> None:
             st.dataframe(merged.head(100), width="stretch", hide_index=True)
 
     with t_r1:
-        render_pattern_table("cycle_member", "R1: Circular Fund Flow Detection", "Identifies directed cycles of length 3–5 with near-equal transfer amounts within a 24-hour window.")
+        render_pattern_table("cycle_member", "R1: Circular Fund Flow Detection", "Directed cycles of length 2–5 with transfer amounts within ±2% inside a 24-hour window.")
     with t_r2:
-        render_pattern_table("fanout", "R2: Outbound Rapid Fan-Out", "Wallets exhibiting ≥20 distinct counterparties, ≥20 outbound transfers, and high outbound volume share.")
+        render_pattern_table("fanout", "R2: Scatter–Gather Smurf Motif", "Wallets scattering to ≥20 counterparties whose intermediaries forward funds onwards (scatter precedes gather, 72-hour window).")
     with t_r3:
-        render_pattern_table("sanctioned_1hop", "R3: Sanctioned Entity Proximity", "Wallets directly transacting with known OFAC/sanctioned seed addresses.")
+        render_pattern_table("sanctioned_1hop", "R3: Sanctioned Entity Proximity", "Wallets with ≥0.01 ETH direct exposure to a frozen OFAC/sanctioned seed; severity scales with exposure fraction.")
     with t_r4:
-        render_pattern_table("pagerank_top5", "R4: Value-Weighted PageRank Centrality", "Wallets in the top 5% value-weighted PageRank distribution.")
+        render_pattern_table("pagerank_top5", "R4: Continuous PageRank Centrality", "Wallets in the continuous value-weighted PageRank tail (≥90th percentile); known hubs excluded.")
     with t_r5:
         render_pattern_table("apriori_match", "R5: Apriori Association Rule Matches", "Wallets satisfying frequent behavioural itemset rules learned from flagged training examples.")
     with t_db:
@@ -1471,6 +1557,13 @@ def main() -> None:
         st.warning("No scores found. Please run the pipeline first: `uv run chainlens --mode sample`")
         st.stop()
 
+    # Apply a view change requested by a button on the previous run. This must
+    # happen before the sidebar radio is created so its widget state can be set.
+    pending_view = st.session_state.pop("_pending_view", None)
+    if pending_view in VIEWS:
+        st.session_state.nav_radio = pending_view
+        st.session_state.active_view = pending_view
+
     # Pre-populate session state
     if not st.session_state.selected_wallet or st.session_state.selected_wallet not in set(scores["address"]):
         high_or_med = scores[scores["tier"].isin(["high", "medium"])]
@@ -1486,19 +1579,22 @@ def main() -> None:
 
         current_view = st.session_state.active_view
         view_idx = VIEWS.index(current_view) if current_view in VIEWS else 0
-        nav_choice = st.radio("Navigate Views", VIEWS, index=view_idx, key="nav_radio")
+        if "nav_radio" in st.session_state:
+            nav_choice = st.radio("Navigate Views", VIEWS, key="nav_radio")
+        else:
+            nav_choice = st.radio("Navigate Views", VIEWS, index=view_idx, key="nav_radio")
         if nav_choice != current_view:
             st.session_state.active_view = nav_choice
 
         st.divider()
         st.markdown("**Quick Wallet Jump**")
-        jump = st.text_input("Enter 0x address", placeholder="0x...", key="sb_jump").strip().lower()
-        if jump:
+        with st.form("jump_form", clear_on_submit=True):
+            jump = st.text_input("Enter 0x address", placeholder="0x...")
+            submitted = st.form_submit_button("Open dossier")
+        if submitted:
+            jump = jump.strip().lower()
             if jump in set(scores["address"]):
-                st.session_state.selected_wallet = jump
-                st.session_state.active_view = "Wallet dossier"
-                st.success("Wallet selected!")
-                st.rerun()
+                navigate("Wallet dossier", jump)
             else:
                 st.warning("Address not found in cohort")
 

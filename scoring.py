@@ -138,6 +138,20 @@ def _rule_params(cfg: RulesConfig, rule_id: str) -> dict[str, Any]:
     return next(rule.params for rule in cfg.rules if rule.id == rule_id)
 
 
+def _payload_strength(payload: dict[str, Any], default: float = 1.0) -> float:
+    """Per-rule severity in [0, 1]; legacy binary flags default to 1.0."""
+    value = payload.get("strength")
+    if value is None:
+        evidence = payload.get("evidence") or {}
+        if isinstance(evidence, dict):
+            value = evidence.get("strength")
+    try:
+        strength = float(value) if value is not None else default
+    except (TypeError, ValueError):
+        strength = default
+    return max(0.0, min(1.0, strength))
+
+
 def evaluate_scores(
     features: pd.DataFrame,
     flags: dict[tuple[str, str], dict[str, Any]],
@@ -150,43 +164,68 @@ def evaluate_scores(
     evaluated_at = evaluated_at or datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     addresses = features["address"].tolist()
 
-    cycle_length: dict[str, int] = {}
-    fanout: set[str] = set()
-    sanctioned: set[str] = set()
-    pagerank: set[str] = set()
+    index = {address: i for i, address in enumerate(addresses)}
+    strength = {rule_id: np.zeros(len(addresses), dtype=float) for rule_id in RULE_IDS}
     apriori: dict[str, float] = {}
-    for (address, signal), payload in flags.items():
-        if signal == "cycle_member":
-            try:
-                cycle_length[address] = int(payload.get("signal_value", 0))
-            except (TypeError, ValueError):
-                cycle_length[address] = 0
-        elif signal == "fanout":
-            fanout.add(address)
-        elif signal == "sanctioned_1hop":
-            sanctioned.add(address)
-        elif signal == "pagerank_top5" and int(payload.get("signal_value", 0)) == 1:
-            pagerank.add(address)
-        elif signal == "apriori_match":
-            apriori[address] = float(payload.get("signal_value", 0.0))
+    sanctioned_seen: set[str] = set()
+    pagerank_seen: set[str] = set()
 
     r1 = _rule_params(cfg, "R1")
-    low = int(r1.get("cycle_length_min", 3))
+    low = int(r1.get("cycle_length_min", 2))
     high = int(r1.get("cycle_length_max", 5))
+    r3 = _rule_params(cfg, "R3")
+    r3_min_strength = float(r3.get("min_strength", 0.0))
+    r4 = _rule_params(cfg, "R4")
+    r4_min_strength = float(r4.get("min_strength", 0.05))
     r5 = _rule_params(cfg, "R5")
     confidence_min = float(r5.get("min_confidence", 0.8))
 
-    addr_series = pd.Series(addresses)
-    hits = {
-        "R1": addr_series.map(lambda a: low <= cycle_length.get(a, 0) <= high).to_numpy(dtype=bool),
-        "R2": addr_series.isin(fanout).to_numpy(dtype=bool),
-        "R3": addr_series.isin(sanctioned).to_numpy(dtype=bool),
-        "R4": addr_series.isin(pagerank).to_numpy(dtype=bool),
-        "R5": addr_series.map(lambda a: apriori.get(a, 0.0) >= confidence_min).to_numpy(dtype=bool),
-    }
+    for (address, signal), payload in flags.items():
+        i = index.get(address)
+        if i is None:
+            continue
+        if signal == "cycle_member":
+            try:
+                length = int(payload.get("signal_value", 0))
+            except (TypeError, ValueError):
+                length = 0
+            if low <= length <= high:
+                strength["R1"][i] = max(strength["R1"][i], _payload_strength(payload))
+        elif signal == "fanout":
+            strength["R2"][i] = max(strength["R2"][i], _payload_strength(payload))
+        elif signal == "sanctioned_1hop":
+            sanctioned_seen.add(address)
+            value = _payload_strength(payload)
+            evidence = payload.get("evidence") or {}
+            if "strength" not in payload and isinstance(evidence, dict) and "exposure_fraction" in evidence:
+                try:
+                    value = max(
+                        float(evidence["exposure_fraction"]),
+                        float(r3.get("min_direct_strength", 0.0)),
+                    )
+                except (TypeError, ValueError):
+                    pass
+            strength["R3"][i] = max(strength["R3"][i], min(1.0, value))
+        elif signal == "pagerank_top5":
+            pagerank_seen.add(address)
+            strength["R4"][i] = max(strength["R4"][i], _payload_strength(payload))
+        elif signal == "apriori_match":
+            confidence = float(payload.get("signal_value", 0.0))
+            apriori[address] = confidence
+            if confidence >= confidence_min:
+                strength["R5"][i] = 1.0
+
+    # Continuous rules can carry a sub-point strength; drop the negligible tail.
+    for rule_id, minimum in (("R3", r3_min_strength), ("R4", r4_min_strength)):
+        if minimum > 0:
+            strength[rule_id] = np.where(strength[rule_id] >= minimum, strength[rule_id], 0.0)
+
+    hits = {rule_id: strength[rule_id] > 0 for rule_id in RULE_IDS}
     weights = {rule.id: rule.weight for rule in cfg.rules}
-    contributions = {rule_id: hits[rule_id].astype(int) * weights[rule_id] for rule_id in RULE_IDS}
-    raw_scores = sum(contributions.values())
+    contributions = {
+        rule_id: np.round(strength[rule_id] * weights[rule_id], 6) for rule_id in RULE_IDS
+    }
+    raw_scores = np.round(sum(contributions.values()), 6)
 
     category_by_address: dict[str, str] = {}
     if known_addresses is not None and not known_addresses.empty:
@@ -196,11 +235,11 @@ def evaluate_scores(
     scores: list[dict[str, Any]] = []
     traces: list[dict[str, Any]] = []
     for i, address in enumerate(addresses):
-        raw = int(raw_scores[i])
+        raw = round(float(raw_scores[i]), 6)
         category = category_by_address.get(address)
         downweighted = bool(category and category in cfg.known_address_categories)
         factor = cfg.known_address_factor if downweighted else 1.0
-        adjusted = raw * factor
+        adjusted = round(raw * factor, 6)
         clamped = adjusted > cfg.max_score
         final = cfg.max_score if clamped else int(round(adjusted))
         tier = tier_for_score(final, cfg)
@@ -213,7 +252,8 @@ def evaluate_scores(
                 "name": rule.name,
                 "hit": hit,
                 "weight": rule.weight,
-                "contribution": int(contributions[rule.id][i]),
+                "strength": round(float(strength[rule.id][i]), 6),
+                "contribution": round(float(contributions[rule.id][i]), 6),
                 "inputs": _json_safe(flags.get((address, SIGNAL_BY_RULE[rule.id]), {}).get("evidence")) if hit else None,
             }
             if rule.id == "R5":
@@ -221,6 +261,13 @@ def evaluate_scores(
                 if not hit and address in apriori:
                     rule_traces[rule.id]["gate"] = (
                         f"confidence {apriori[address]:.3f} < {confidence_min:.2f}"
+                    )
+            elif rule.id in ("R3", "R4") and not hit:
+                seen = sanctioned_seen if rule.id == "R3" else pagerank_seen
+                minimum = r3_min_strength if rule.id == "R3" else r4_min_strength
+                if address in seen:
+                    rule_traces[rule.id]["gate"] = (
+                        f"strength {float(strength[rule.id][i]):.3f} < {minimum:.3f}"
                     )
 
         if raw > 0:
@@ -276,13 +323,14 @@ def evaluate_scores(
 
 
 def validate_trace(trace: dict[str, Any]) -> None:
-    raw = int(trace["raw_score"])
-    if sum(int(rule["contribution"]) for rule in trace["rules"].values()) != raw:
+    raw = float(trace["raw_score"])
+    contribution_sum = sum(float(rule["contribution"]) for rule in trace["rules"].values())
+    if not math.isclose(contribution_sum, raw, abs_tol=1e-5):
         raise RuntimeError("trace contributions do not sum to raw_score")
     factor = float(trace["downweight"]["factor"])
-    if abs(float(trace["adjusted_raw_score"]) - raw * factor) > 1e-9:
+    if not math.isclose(float(trace["adjusted_raw_score"]), raw * factor, abs_tol=1e-5):
         raise RuntimeError("adjusted_raw_score != raw_score * factor")
-    if trace["downweight"]["pre_downweight_raw"] != raw:
+    if not math.isclose(float(trace["downweight"]["pre_downweight_raw"]), raw, abs_tol=1e-5):
         raise RuntimeError("downweight.pre_downweight_raw != raw_score")
     if bool(trace["clamped"]) != (raw * factor > int(trace["max_score"])):
         raise RuntimeError("clamped flag disagrees with max_score")

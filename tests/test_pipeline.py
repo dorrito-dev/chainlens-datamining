@@ -99,6 +99,64 @@ def test_dashboard_starts_without_exceptions(sample_output: Path, monkeypatch) -
         assert len(app.exception) == 0, f"Error in view {view}: {[e.value for e in app.exception]}"
 
 
+def test_dashboard_row_navigation(sample_output: Path, monkeypatch) -> None:
+    """Row buttons must actually move to the dossier of the clicked wallet."""
+    from streamlit.testing.v1 import AppTest
+
+    monkeypatch.setenv("CHAINLENS_OUTPUT_DIR", str(sample_output))
+    app = AppTest.from_file(str(ROOT / "dashboard.py"), default_timeout=90)
+    app.run()
+
+    labels = [button.label for button in app.button]
+    if any(label.startswith("Dossier") for label in labels):
+        index = next(i for i, label in enumerate(labels) if label.startswith("Dossier"))
+        expected = app.button[index].key.removeprefix("top_")
+        app.button[index].click().run()
+        assert app.session_state["active_view"] == "Wallet dossier"
+        assert app.session_state["selected_wallet"] == expected
+        assert len(app.exception) == 0, [e.value for e in app.exception]
+
+    app.radio(key="nav_radio").set_value("Triage").run()
+    inspect = [button for button in app.button if button.label == "Inspect"]
+    if inspect:
+        expected = inspect[0].key.removeprefix("triage_btn_")
+        inspect[0].click().run()
+        assert app.session_state["active_view"] == "Wallet dossier"
+        assert app.session_state["selected_wallet"] == expected
+        assert any("Wallet Investigative Dossier" in item.value for item in app.markdown)
+        assert len(app.exception) == 0, [e.value for e in app.exception]
+
+    # The sidebar quick jump must always navigate, even when no row buttons exist.
+    app.radio(key="nav_radio").set_value("Overview").run()
+    address = app.session_state["selected_wallet"]
+    app.text_input[0].set_value(address)
+    next(b for b in app.button if b.label == "Open dossier").click()
+    app.run()
+    assert app.session_state["active_view"] == "Wallet dossier"
+    assert app.session_state["selected_wallet"] == address
+    assert len(app.exception) == 0, [e.value for e in app.exception]
+
+    # Dossier exposes the full address in a copyable code block.
+    assert len(app.code) >= 1
+
+
+def test_dashboard_network_defaults_to_connected_wallet(sample_output: Path, monkeypatch) -> None:
+    """Network view must not open on a lone wallet when hubs exist."""
+    from streamlit.testing.v1 import AppTest
+
+    monkeypatch.setenv("CHAINLENS_OUTPUT_DIR", str(sample_output))
+    app = AppTest.from_file(str(ROOT / "dashboard.py"), default_timeout=90)
+    app.run()
+    app.radio(key="nav_radio").set_value("Network").run()
+    assert len(app.exception) == 0, [e.value for e in app.exception]
+
+    captions = [c.value for c in app.caption if c.value.startswith("Rendered subgraph")]
+    assert captions, "subgraph caption missing"
+    nodes = int(captions[0].split()[2])
+    assert nodes >= 5, captions[0]
+    assert len(app.selectbox(key="net_hub_pick").options) > 0
+
+
 def test_dashboard_read_only_contract() -> None:
     content = (ROOT / "dashboard.py").read_text(encoding="utf-8")
     for forbidden in ["import scoring", "import patterns", "import evaluate", "from scoring import", "from patterns import", "from evaluate import"]:
